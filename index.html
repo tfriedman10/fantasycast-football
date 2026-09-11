@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FantasyCast Football</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>🏈 FantasyCast Football</h1>
+        <p id="subtitle">All my leagues · <strong id="username-label">tfriedman10</strong> · <span id="season-label">…</span></p>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="control-panel">
+      <div class="panel-header">
+        <h2>Setup</h2>
+        <button id="panel-toggle" type="button">Hide setup ▲</button>
+      </div>
+      <div class="panel-groups">
+        <div class="panel-group">
+          <h3>Sleeper</h3>
+          <div class="controls">
+            <label>
+              Username
+              <input id="username-input" type="text" value="tfriedman10" spellcheck="false" />
+            </label>
+            <label>
+              Season
+              <select id="season-input">
+                <option value="2026" selected>2026</option>
+                <option value="2025">2025</option>
+                <option value="2024">2024</option>
+                <option value="2023">2023</option>
+              </select>
+            </label>
+            <button id="load-btn">Load Sleeper</button>
+          </div>
+          <div id="status" class="status">Loading…</div>
+        </div>
+        <div class="panel-group">
+          <h3>ESPN</h3>
+          <p class="espn-hint">League ID is in the ESPN URL: <code>fantasy.espn.com/football/league?leagueId=<strong>1234567</strong></code>. Private leagues also need SWID + espn_s2 (ESPN site → F12 → Application → Cookies → espn.com).</p>
+          <div class="controls">
+            <label>
+              League ID
+              <input id="espn-league-input" type="text" inputmode="numeric" placeholder="e.g. 1234567" spellcheck="false" />
+            </label>
+            <label>
+              Season
+              <select id="espn-season-input">
+                <option value="2026" selected>2026</option>
+                <option value="2025">2025</option>
+                <option value="2024">2024</option>
+              </select>
+            </label>
+            <label>
+              Week
+              <input id="espn-week-input" type="number" min="1" max="18" placeholder="auto" />
+            </label>
+            <label>
+              My team
+              <select id="espn-team-input"><option value="">(load league first)</option></select>
+            </label>
+            <button id="espn-load-btn">Load ESPN</button>
+          </div>
+          <details class="espn-creds">
+            <summary>Private league? Add SWID + espn_s2 (stored only in this browser)</summary>
+            <div class="controls">
+              <label>
+                SWID
+                <input id="espn-swid-input" type="password" placeholder="{XXXXXXXX-...}" autocomplete="off" spellcheck="false" />
+              </label>
+              <label>
+                espn_s2
+                <input id="espn-s2-input" type="password" placeholder="long token…" autocomplete="off" spellcheck="false" />
+              </label>
+            </div>
+          </details>
+          <div id="espn-status" class="status">Enter an ESPN League ID above to load it.</div>
+        </div>
+        <div class="panel-group">
+          <h3>Leagues</h3>
+          <div id="visible-count" class="player-sub">No leagues loaded yet.</div>
+          <div id="league-toggles" class="toggles"></div>
+          <div class="toggle-actions">
+            <button id="show-all-btn" type="button">Show all</button>
+            <button id="hide-all-btn" type="button">Hide all</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button id="tab-leagues" class="tab active" type="button" role="tab" aria-selected="true" data-tab="leagues">Leagues</button>
+      <button id="tab-gameday" class="tab" type="button" role="tab" aria-selected="false" data-tab="gameday">GameDay</button>
+    </nav>
+
+    <div id="view-leagues">
+      <div id="leagues" class="leagues"></div>
+    </div>
+
+    <div id="view-gameday" hidden>
+      <section id="gameday-panel">
+        <div class="gd-controls">
+          <div>
+            <h2 style="margin:0">GameDay</h2>
+            <p class="player-sub" style="margin:4px 0 0 0">My starters + opponent starters only (benches excluded). Shotgun / chopped / guillotine leagues show my starters with no opponent. Fantasy points are live league scoring — treated as half-PPR comparable; dynasty value shown if a league hasn't reported yet.</p>
+          </div>
+          <div class="controls">
+            <label>
+              Group by
+              <select id="gameday-group-input">
+                <option value="nfl" selected>NFL game</option>
+                <option value="matchup">Fantasy matchup</option>
+              </select>
+            </label>
+            <label id="gameday-league-wrap" hidden>
+              League
+              <select id="gameday-league-input"><option value="">(no leagues yet)</option></select>
+            </label>
+            <button id="gameday-refresh-btn" type="button">Refresh scores</button>
+          </div>
+        </div>
+        <div id="gameday-status" class="status">Load your leagues first, then open this tab.</div>
+        <div id="gameday" class="gameday"></div>
+      </section>
+    </div>
+    <p style="color: var(--muted); font-size: 13px; margin-top: 16px;">If nothing loads, press F12 → Console and copy any red error, or try a different season.</p>
+  </main>
+
+  <footer>
+    <p>Data live from the Sleeper API · <a href="https://docs.sleeper.com/" target="_blank" rel="noreferrer">docs.sleeper.com</a></p>
+  </footer>
+
+  <script src="app.js?v=17"></script>
+</body>
+</html>
