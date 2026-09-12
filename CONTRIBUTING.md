@@ -24,8 +24,8 @@ Branch from `main`, one topic per branch, delete after merge.
 
 Every PR passes two modes:
 
-- **Mode A — full local:** launch via `run.bat` (proxy present). Sleeper + public ESPN + private ESPN (with SWID + espn_s2) load.
-- **Mode B — static-only (Pages simulation):** serve with `python -m http.server` (no proxy). Public leagues load via direct fallback; private leagues show cookie guidance instead of data.
+- **Mode A — full local:** launch via `run.bat` (proxy present). Sleeper + public ESPN load.
+- **Mode B — static-only (Pages simulation):** serve with `python -m http.server` (no proxy). Public leagues load via direct fallback.
 
 Also: hard-refresh (Ctrl+Shift+R), F12 console clean, phone-width viewport readable.
 

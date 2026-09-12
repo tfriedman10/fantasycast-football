@@ -9,7 +9,7 @@
 ## Tested
 
 - [ ] Mode A — full local (`run.bat`, proxy present): Sleeper + ESPN load.
-- [ ] Mode B — static-only (`python -m http.server`, no proxy): public leagues load, private shows cookie guidance.
+- [ ] Mode B — static-only (`python -m http.server`, no proxy): public leagues load.
 - [ ] Hard-refresh (Ctrl+Shift+R); F12 console has no new errors.
 - [ ] Phone-width viewport eyeballed (setup panel + GameDay readable).
 

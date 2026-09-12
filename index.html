@@ -45,7 +45,7 @@
         </div>
         <div class="panel-group">
           <h3>ESPN</h3>
-          <p class="espn-hint">League ID is in the ESPN URL: <code>fantasy.espn.com/football/league?leagueId=<strong>1234567</strong></code>. Private leagues also need SWID + espn_s2 (ESPN site → F12 → Application → Cookies → espn.com).</p>
+          <p class="espn-hint">Public leagues only. League ID is in the ESPN URL: <code>fantasy.espn.com/football/league?leagueId=<strong>1234567</strong></code>. Week auto-fills from your Sleeper week when available — leave blank for auto. To add a 2nd/3rd league, change the League ID and click Add again.</p>
           <div class="controls">
             <label>
               League ID
@@ -67,21 +67,9 @@
               My team
               <select id="espn-team-input"><option value="">(load league first)</option></select>
             </label>
-            <button id="espn-load-btn">Load ESPN</button>
+            <button id="espn-load-btn">Add ESPN league</button>
           </div>
-          <details class="espn-creds">
-            <summary>Private league? Add SWID + espn_s2 (stored only in this browser)</summary>
-            <div class="controls">
-              <label>
-                SWID
-                <input id="espn-swid-input" type="password" placeholder="{XXXXXXXX-...}" autocomplete="off" spellcheck="false" />
-              </label>
-              <label>
-                espn_s2
-                <input id="espn-s2-input" type="password" placeholder="long token…" autocomplete="off" spellcheck="false" />
-              </label>
-            </div>
-          </details>
+          <div id="espn-loaded-list" class="toggles" style="margin-top:8px"></div>
           <div id="espn-status" class="status">Enter an ESPN League ID above to load it.</div>
         </div>
         <div class="panel-group">
@@ -97,11 +85,12 @@
     </section>
 
     <nav class="tabs" role="tablist" aria-label="Views">
-      <button id="tab-leagues" class="tab active" type="button" role="tab" aria-selected="true" data-tab="leagues">Leagues</button>
+      <button id="tab-leagues" class="tab active" type="button" role="tab" aria-selected="true" data-tab="leagues">Lineups</button>
       <button id="tab-gameday" class="tab" type="button" role="tab" aria-selected="false" data-tab="gameday">GameDay</button>
     </nav>
 
     <div id="view-leagues">
+      <div id="leagues-header" class="status" hidden></div>
       <div id="leagues" class="leagues"></div>
     </div>
 
@@ -113,6 +102,7 @@
             <p class="player-sub" style="margin:4px 0 0 0">My starters + opponent starters only (benches excluded). Shotgun / chopped / guillotine leagues show my starters with no opponent. Fantasy points are live league scoring — treated as half-PPR comparable; dynasty value shown if a league hasn't reported yet.</p>
           </div>
           <div class="controls">
+            <button id="gameday-refresh-btn" type="button">Refresh scores</button>
             <label>
               Group by
               <select id="gameday-group-input">
@@ -124,7 +114,6 @@
               League
               <select id="gameday-league-input"><option value="">(no leagues yet)</option></select>
             </label>
-            <button id="gameday-refresh-btn" type="button">Refresh scores</button>
           </div>
         </div>
         <div id="gameday-status" class="status">Load your leagues first, then open this tab.</div>
@@ -138,6 +127,6 @@
     <p>Data live from the Sleeper API · <a href="https://docs.sleeper.com/" target="_blank" rel="noreferrer">docs.sleeper.com</a></p>
   </footer>
 
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>
