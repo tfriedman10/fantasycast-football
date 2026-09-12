@@ -22,7 +22,14 @@ Branch from `main`, one topic per branch, delete after merge.
 
 ## Verification
 
-Every PR passes two modes:
+Every PR passes automated checks plus two manual modes:
+
+Run `python tests/smoke.py` before opening a PR (stdlib only, offline,
+~5s, also runs on every PR via GitHub Actions). It covers static checks,
+ID wiring, the static boundary, both serve modes (error paths only — no
+live ESPN calls), JS pure-function units, and offline UX evals.
+
+Manual per-PR (not automatable here):
 
 - **Mode A — full local:** launch via `run.bat` (proxy present). Sleeper + public ESPN load.
 - **Mode B — static-only (Pages simulation):** serve with `python -m http.server` (no proxy). Public leagues load via direct fallback.
