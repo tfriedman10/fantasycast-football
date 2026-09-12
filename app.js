@@ -1472,7 +1472,7 @@ function renderGameday() {
           <td><span class="side ${e.side}">${e.side === "mine" ? "ME" : "OPP"}</span></td>
           <td>
             <div class="player-name">${escHtml(e.playerName)}</div>
-            <div class="player-sub">${escHtml(e.pos)} · ${escHtml(e.nflTeam || "—")} · ${escHtml(e.slot)}</div>
+            <div class="player-sub">${escHtml(e.pos)} · ${escHtml(e.nflTeam || "—")}</div>
           </td>
           <td><span class="league-tag">${escHtml(e.leagueName)}</span><div class="player-sub">${e.platform === "espn" ? "ESPN" : "Sleeper"} · ${escHtml(e.teamLabel)}</div></td>
           <td class="fpts-cell">${fptsFor(e)}</td>
