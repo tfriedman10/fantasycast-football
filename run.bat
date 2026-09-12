@@ -22,6 +22,6 @@ echo.
 
 REM Open browser after ~2s in background so the server has time to start.
 start "" /min cmd /c "ping 127.0.0.1 -n 3 >nul & start http://localhost:%PORT%/ & exit"
-REM server.py serves the app AND proxies ESPN (needed for private leagues).
+REM server.py serves the app AND proxies public ESPN API calls (avoids CORS).
 python "%~dp0server.py" %PORT%
 pause

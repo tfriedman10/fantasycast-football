@@ -208,6 +208,36 @@ async function getSchedule(season, week, seasonType) {
   return result;
 }
 
+function gameForTeam(nflTeam, schedule) {
+  const t = normTeam(nflTeam);
+  if (!t || !schedule || !schedule.map || !schedule.games) return null;
+  const m = schedule.map[t];
+  if (!m) return null;
+  return (m.gameId && schedule.games[m.gameId]) || null;
+}
+
+function isGameStarted(nflTeam, schedule) {
+  const g = gameForTeam(nflTeam, schedule);
+  return !!g && g.state !== "pre";
+}
+
+function lockForTeam(nflTeam, schedule) {
+  return isGameStarted(nflTeam, schedule)
+    ? `<div class="lock" title="Game started — lineup locked">🔒</div>`
+    : "";
+}
+
+// Slot cell with the lock stacked below the position (not beside it).
+// The td also gets a "locked" class so the row can be dimmed via CSS.
+function slotCell(label, nflTeam, schedule) {
+  const locked = isGameStarted(nflTeam, schedule);
+  return `<td class="slot${locked ? " locked" : ""}"><div class="slot-pos">${label}</div>${locked ? lockForTeam(nflTeam, schedule) : ""}</td>`;
+}
+
+function lockedRowClass(nflTeam, schedule) {
+  return isGameStarted(nflTeam, schedule) ? "locked" : "";
+}
+
 function gamePillHtml(nflTeam, schedule) {
   const t = normTeam(nflTeam);
   if (!t) return "";
@@ -215,6 +245,13 @@ function gamePillHtml(nflTeam, schedule) {
   const g = schedule.map[t];
   if (!g) return `<span class="game-pill game-bye" title="No game scheduled this week">Bye</span>`;
   const matchup = g.homeAway === "home" ? `vs ${g.opp}` : `@ ${g.opp}`;
+  const game = gameForTeam(t, schedule);
+  // Once a game has started, never highlight the standalone window —
+  // show live/final detail as a plain pill instead.
+  if (game && game.state !== "pre") {
+    const detail = game.detail || g.label;
+    return `<span class="game-pill" title="${detail}">${matchup} · ${detail}</span>`;
+  }
   if (g.special) {
     return `<span class="game-pill game-special" title="Standalone window — not Sun 1pm/4pm ET">🌙 ${matchup} · ${g.label}</span>`;
   }
@@ -284,6 +321,7 @@ function syncLeagues() {
     label.appendChild(span);
     box.appendChild(label);
   }
+  updateLeaguesHeader();
 }
 
 // ---------------- GameDay shared state ----------------
@@ -300,10 +338,11 @@ function isChoppedLeague(name) {
 }
 
 // Which no-opponent format is it, for display ("No opponent (guillotine)").
+// Note: "Shotgun" is just one league's name for the guillotine format,
+// so it also displays as guillotine.
 function choppedKind(name) {
   const n = String(name || "");
-  if (/guillotine/i.test(n)) return "guillotine";
-  if (/shotgun/i.test(n)) return "shotgun";
+  if (/guillotine|shotgun/i.test(n)) return "guillotine";
   return "chopped";
 }
 
@@ -316,6 +355,21 @@ function fmtPts(n) {
   return Number(n).toFixed(1);
 }
 
+function updateLeaguesHeader() {
+  // Week number + moon legend shown once at the top (not per card).
+  const el = document.getElementById("leagues-header");
+  if (!el) return;
+  const week = gdWeek || (lastEspn && lastEspn.week) || (gdSchedule && gdSchedule.week) || null;
+  const hasLeagues = leagueStore.size > 0;
+  if (!hasLeagues) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = `${week ? `NFL Week ${week} · ` : ""}🌙 = special window (anything other than Sun 1pm / 4pm ET: Thu, SNF, Mon, Sat, London) · 🔒 = player's NFL game has started (lineup locked)`;
+}
+
 function renderLeague(league, roster, user, players, schedule) {
   const teamName =
     (user && user.metadata && user.metadata.team_name) ||
@@ -326,8 +380,22 @@ function renderLeague(league, roster, user, players, schedule) {
   const fpts = s.fpts_decimal != null ? `${s.fpts ?? 0}.${String(s.fpts_decimal).padStart(2, "0")}` : (s.fpts ?? "—");
 
   const slots = starterSlots(league, roster);
-  const bench = benchIds(roster);
-  const weekPill = schedule && schedule.week ? `<span class="pill">NFL W${schedule.week}</span>` : "";
+  // Non-standard bench spots (IR / Taxi / Reserve) live apart from the bench.
+  const nonStandard = new Map(); // pid -> label
+  for (const [key, label] of [["taxi", "Taxi"], ["reserve", "Reserve"], ["injured_reserve", "IR"]]) {
+    if (Array.isArray(roster[key])) {
+      for (const pid of roster[key]) nonStandard.set(String(pid), label);
+    }
+  }
+  const benchAll = benchIds(roster);
+  const bench = benchAll.filter((pid) => !nonStandard.has(String(pid)));
+  const grouped = new Map(); // label -> [pid]
+  for (const pid of benchAll) {
+    const label = nonStandard.get(String(pid));
+    if (!label) continue;
+    if (!grouped.has(label)) grouped.set(label, []);
+    grouped.get(label).push(pid);
+  }
 
   const playerCell = (d, playerId) => `
     <div class="player-name ${!playerId || playerId === "0" ? "empty" : ""}">${d.name}</div>
@@ -339,9 +407,9 @@ function renderLeague(league, roster, user, players, schedule) {
   const starterRows = slots
     .map(({ slot, playerId }) => {
       const d = describePlayer(playerId, players);
-      return `<tr>
-        <td class="slot">${slot}</td>
-        <td>${playerCell(d, playerId)}</td>
+      return `<tr class="${lockedRowClass(d.team, schedule)}">
+        ${slotCell(slot, d.team, schedule)}
+        <td class="player-cell">${playerCell(d, playerId)}</td>
       </tr>`;
     })
     .join("");
@@ -352,21 +420,30 @@ function renderLeague(league, roster, user, players, schedule) {
       : bench
           .map((pid) => {
             const d = describePlayer(pid, players);
-            return `<tr>
-              <td class="slot">${d.pos}</td>
-              <td>${playerCell(d, pid)}</td>
+            return `<tr class="${lockedRowClass(d.team, schedule)}">
+              ${slotCell(d.pos, d.team, schedule)}
+              <td class="player-cell">${playerCell(d, pid)}</td>
             </tr>`;
           })
           .join("");
 
-  // Taxi / IR / Reserve extras (dynasty leagues)
-  const extras = [];
-  for (const key of ["taxi", "reserve", "injured_reserve"]) {
-    if (Array.isArray(roster[key]) && roster[key].length > 0) {
-      const names = roster[key].map((pid) => describePlayer(pid, players).name).join(", ");
-      extras.push(`<div class="player-sub"><strong>${key.toUpperCase()}:</strong> ${names}</div>`);
-    }
-  }
+  const extraSections = [...grouped.entries()]
+    .map(([label, ids]) => {
+      const rows = ids
+        .map((pid) => {
+          const d = describePlayer(pid, players);
+          return `<tr class="${lockedRowClass(d.team, schedule)}">
+            ${slotCell(d.pos, d.team, schedule)}
+            <td class="player-cell">${playerCell(d, pid)}</td>
+          </tr>`;
+        })
+        .join("");
+      return `<div class="section">
+        <h3>${label} (${ids.length})</h3>
+        <table><tbody>${rows}</tbody></table>
+      </div>`;
+    })
+    .join("");
 
   const card = document.createElement("div");
   card.className = "league-card";
@@ -378,9 +455,7 @@ function renderLeague(league, roster, user, players, schedule) {
         <span class="pill">Record ${record}</span>
         <span class="pill">${league.total_rosters}-team · ${league.season}</span>
         <span class="pill">${fpts} pts</span>
-        ${weekPill}
       </div>
-      <div class="player-sub" style="margin-top:6px">🌙 = special window (anything other than Sun 1pm / 4pm ET: Thu, SNF, Mon, Sat, London)</div>
     </div>
     <div class="section">
       <h3>Starting lineup</h3>
@@ -389,8 +464,8 @@ function renderLeague(league, roster, user, players, schedule) {
     <div class="section">
       <h3>Bench (${bench.length})</h3>
       <table><tbody>${benchRows}</tbody></table>
-      ${extras.join("")}
     </div>
+    ${extraSections}
   `;
   return card;
 }
@@ -478,6 +553,15 @@ async function load() {
     const schedWeek = (nflState && (nflState.display_week ?? nflState.week)) || 1;
     const schedSeason = (nflState && nflState.season) || season;
     const schedType = (nflState && nflState.season_type) || "regular";
+    // Q1: ESPN week defaults to the Sleeper week — prefill the input when the
+    // user hasn't typed one so Add ESPN league picks it up automatically.
+    try {
+      const espnWeekEl = document.getElementById("espn-week-input");
+      if (espnWeekEl && !espnWeekEl.value) {
+        espnWeekEl.value = schedWeek;
+        espnWeekEl.placeholder = `auto (${schedWeek})`;
+      }
+    } catch (e) {}
     const [players, schedule] = await Promise.all([
       getPlayersMap(),
       getSchedule(schedSeason, schedWeek, schedType).catch((e) => {
@@ -493,6 +577,7 @@ async function load() {
     gdSchedule = schedule;
     gdWeek = schedWeek;
     gdSeason = schedSeason;
+    updateLeaguesHeader();
     setStatus(`Loading week ${schedWeek} matchups for GameDay…`);
     await Promise.all(
       leagueData.map(async (d) => {
@@ -527,12 +612,10 @@ console.log("[FantasyCast] app.js loaded, scheduling initial load");
 setStatus("Starting… if this never changes, app.js failed to run (hard-refresh Ctrl+Shift+R).");
 setTimeout(load, 50);
 
-// ---------------- ESPN fantasy leagues ----------------
-// Public leagues need only the numeric League ID. Private leagues also need
-// the SWID + espn_s2 cookies (ESPN site → F12 → Application → Cookies).
+// ---------------- ESPN fantasy leagues (public leagues only) ----------------
+// Public leagues need only the numeric League ID.
 // Requests go through the local /api/espn proxy (server.py) when available,
-// falling back to a direct reads-host call (works if you're logged into ESPN
-// in this browser).
+// falling back to a direct reads-host call.
 const ESPN_READS = "https://lm-api-reads.fantasy.espn.com";
 const ESPN_SLOT_NAMES = { 0: "QB", 1: "TQB", 2: "RB", 3: "RB/WR", 4: "WR", 5: "WR/TE", 6: "TE", 7: "OP", 8: "DT", 9: "DE", 10: "LB", 11: "DL", 12: "CB", 13: "S", 14: "DB", 15: "DP", 16: "D/ST", 17: "K", 18: "P", 19: "HC", 20: "BN", 21: "IR", 23: "FLEX" };
 const ESPN_SLOT_ORDER = ["QB", "RB", "RB/WR", "WR", "WR/TE", "TE", "FLEX", "OP", "TQB", "DT", "DE", "LB", "DL", "CB", "S", "DB", "DP", "D/ST", "K", "P", "HC"];
@@ -543,12 +626,8 @@ const espnLeagueInput = document.getElementById("espn-league-input");
 const espnSeasonInput = document.getElementById("espn-season-input");
 const espnWeekInput = document.getElementById("espn-week-input");
 const espnTeamInput = document.getElementById("espn-team-input");
-const espnSwidInput = document.getElementById("espn-swid-input");
-const espnS2Input = document.getElementById("espn-s2-input");
 const espnLoadBtn = document.getElementById("espn-load-btn");
 const espnStatusEl = document.getElementById("espn-status");
-
-let lastEspn = null; // { leagueName, season, week, teams, members, schedule }
 
 function espnStatus(msg, isError = false) {
   espnStatusEl.textContent = msg;
@@ -565,14 +644,9 @@ async function espnApi(season, leagueId, views, params = {}) {
   for (const [k, v] of Object.entries(params)) q.append(k, String(v));
   const query = q.toString();
   let proxyError = null;
-  // 1) Same-origin proxy (server.py). Carries pasted SWID/espn_s2 for private leagues.
+  // 1) Same-origin proxy (server.py) to avoid browser CORS issues.
   try {
-    const headers = {};
-    const s2 = espnS2Input.value.trim();
-    const sw = espnSwidInput.value.trim();
-    if (s2) headers["X-ESPN-S2"] = s2;
-    if (sw) headers["X-ESPN-SWID"] = sw;
-    const res = await fetch(`/api/espn?season=${encodeURIComponent(season)}&leagueId=${encodeURIComponent(leagueId)}&${query}`, { headers });
+    const res = await fetch(`/api/espn?season=${encodeURIComponent(season)}&leagueId=${encodeURIComponent(leagueId)}&${query}`);
     const text = await res.text();
     let j = null;
     try { j = JSON.parse(text); } catch (e) { /* proxy absent (other server) → fall through */ }
@@ -584,22 +658,22 @@ async function espnApi(season, leagueId, views, params = {}) {
     proxyError = proxyError || e;
     console.warn("[FantasyCast] ESPN proxy failed, trying direct", e);
   }
-  // 2) Direct reads-host call (public leagues; private only if ESPN login cookies are sent).
+  // 2) Direct reads-host call (public leagues).
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 25000);
     let res, j;
     try {
-      res = await fetch(`${ESPN_READS}/apis/v3/games/ffl/seasons/${encodeURIComponent(season)}/segments/0/leagues/${encodeURIComponent(leagueId)}?${query}`, { signal: ctrl.signal, credentials: "include" });
+      res = await fetch(`${ESPN_READS}/apis/v3/games/ffl/seasons/${encodeURIComponent(season)}/segments/0/leagues/${encodeURIComponent(leagueId)}?${query}`, { signal: ctrl.signal });
       j = await res.json();
     } finally {
       clearTimeout(t);
     }
     if (hasEspnData(j)) return j;
-    throw new Error(`ESPN rejected the request (HTTP ${res.status}). ${res.status === 401 || res.status === 403 ? "Private league: paste SWID + espn_s2 above, or log into ESPN in this browser and retry." : "Check League ID / season."}`);
+    throw new Error(`ESPN rejected the request (HTTP ${res.status}). ${res.status === 401 || res.status === 403 ? "This looks like a private league, which isn't supported. Check League ID / season." : "Check League ID / season."}`);
   } catch (e) {
     console.error("[FantasyCast] ESPN direct failed", e);
-    throw proxyError && /SWID|Private|league ID/i.test(proxyError.message) ? proxyError : e;
+    throw proxyError && /Private|league ID/i.test(proxyError.message) ? proxyError : e;
   }
 }
 
@@ -611,7 +685,7 @@ function espnOwnerName(team, members) {
   return m ? (m.displayName || `${m.firstName || ""} ${m.lastName || ""}`.trim()) : "";
 }
 
-function renderEspnCard(leagueName, season, week, team, members, schedule) {
+function renderEspnCard({ leagueId, leagueName, season, week, team, teams, members, schedule }) {
   const entries = (team.roster && team.roster.entries) || [];
   const rec = (team.record && team.record.overall) || {};
   const owner = espnOwnerName(team, members);
@@ -635,14 +709,24 @@ function renderEspnCard(leagueName, season, week, team, members, schedule) {
   const ir = entries.filter((e) => e.lineupSlotId === 21);
   const starterRows = starters.map((e) => {
     const d = info(e);
-    return `<tr><td class="slot">${ESPN_SLOT_NAMES[e.lineupSlotId] || "—"}</td><td>${cell(d)}</td></tr>`;
+    return `<tr class="${lockedRowClass(d.nfl, schedule)}">${slotCell(ESPN_SLOT_NAMES[e.lineupSlotId] || "—", d.nfl, schedule)}<td class="player-cell">${cell(d)}</td></tr>`;
   }).join("") || `<tr><td class="empty">No starters found</td></tr>`;
   const benchRows = bench.length === 0
     ? `<tr><td class="empty">Bench is empty</td></tr>`
     : bench.map((e) => {
         const d = info(e);
-        return `<tr><td class="slot">${d.pos}</td><td>${cell(d)}</td></tr>`;
+        return `<tr class="${lockedRowClass(d.nfl, schedule)}">${slotCell(d.pos, d.nfl, schedule)}<td class="player-cell">${cell(d)}</td></tr>`;
       }).join("");
+  const irRows = ir.map((e) => {
+    const d = info(e);
+    return `<tr class="${lockedRowClass(d.nfl, schedule)}">${slotCell(d.pos, d.nfl, schedule)}<td class="player-cell">${cell(d)}</td></tr>`;
+  }).join("");
+  const teamOptions = (teams || []).map((t) => {
+    const o = espnOwnerName(t, members);
+    const label = `${t.name || t.abbrev || `Team ${t.id}`}${o ? ` (${o})` : ""}`;
+    const sel = String(t.id) === String(team.id) ? " selected" : "";
+    return `<option value="${t.id}"${sel}>${label}</option>`;
+  }).join("");
   const card = document.createElement("div");
   card.className = "league-card";
   card.innerHTML = `
@@ -651,9 +735,11 @@ function renderEspnCard(leagueName, season, week, team, members, schedule) {
       <div class="league-meta">
         <span class="pill">${team.name || team.abbrev || `Team ${team.id}`}${owner ? ` · ${owner}` : ""}</span>
         <span class="pill">Record ${rec.wins ?? 0}-${rec.losses ?? 0}${rec.ties ? `-${rec.ties}` : ""}</span>
-        <span class="pill">${season} · W${week}</span>
+        <span class="pill">${season} · ${teams ? teams.length : "?"}-team</span>
       </div>
-      <div class="player-sub" style="margin-top:6px">🌙 = special window (anything other than Sun 1pm / 4pm ET: Thu, SNF, Mon, Sat, London)</div>
+      <label class="player-sub" style="display:block;margin-top:6px">My team:
+        <select class="espn-team-picker controls" data-league="${leagueId}" style="margin-left:6px;max-width:100%">${teamOptions}</select>
+      </label>
     </div>
     <div class="section">
       <h3>Starting lineup</h3>
@@ -662,30 +748,103 @@ function renderEspnCard(leagueName, season, week, team, members, schedule) {
     <div class="section">
       <h3>Bench (${bench.length})</h3>
       <table><tbody>${benchRows}</tbody></table>
-      ${ir.length ? `<div class="player-sub"><strong>IR:</strong> ${ir.map((e) => info(e).name).join(", ")}</div>` : ""}
     </div>
+    ${ir.length ? `<div class="section"><h3>IR (${ir.length})</h3><table><tbody>${irRows}</tbody></table></div>` : ""}
   `;
   return card;
 }
 
-function renderEspn() {
-  if (!lastEspn) return;
-  const team = lastEspn.teams.find((t) => String(t.id) === String(espnTeamInput.value)) || lastEspn.teams[0];
-  if (!team) {
-    espnStatus("League loaded but no teams found.", true);
-    return;
+// Multiple ESPN leagues: each Add appends to this map (keyed by leagueId).
+// lastEspn stays as an alias to the most-recently-loaded entry so week
+// headers / GameDay fallbacks keep working with older persisted state.
+const espnDataById = new Map();
+let lastEspn = null; // most recent entry in espnDataById
+
+function getEspnList() {
+  return [...espnDataById.values()];
+}
+
+function persistEspnLeagues() {
+  try {
+    const arr = getEspnList().map((d) => ({ leagueId: d.leagueId, season: d.season, teamId: d.selectedTeamId }));
+    localStorage.setItem("espn_leagues", JSON.stringify(arr));
+  } catch (e) { /* persistence optional */ }
+}
+
+function syncEspnLoadedList() {
+  const box = document.getElementById("espn-loaded-list");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const d of getEspnList()) {
+    const label = document.createElement("label");
+    label.className = "toggle-row";
+    const span = document.createElement("span");
+    span.textContent = `${d.leagueName} (${d.season} · W${d.week})`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Remove";
+    btn.style.marginLeft = "8px";
+    btn.addEventListener("click", () => removeEspnLeague(d.leagueId));
+    label.appendChild(span);
+    label.appendChild(btn);
+    box.appendChild(label);
   }
-  const card = renderEspnCard(lastEspn.leagueName, lastEspn.season, lastEspn.week, team, lastEspn.members, lastEspn.schedule);
-  tagCard(card, "espn", "ESPN");
-  const key = `espn:${lastEspn.leagueId}`;
-  leagueStore.set(key, {
-    key,
-    platform: "espn",
-    name: lastEspn.leagueName,
-    card,
-  });
+}
+
+function removeEspnLeague(leagueId) {
+  espnDataById.delete(String(leagueId));
+  leagueStore.delete(`espn:${leagueId}`);
+  if (lastEspn && String(lastEspn.leagueId) === String(leagueId)) {
+    const rest = getEspnList();
+    lastEspn = rest.length ? rest[rest.length - 1] : null;
+  }
+  persistEspnLeagues();
+  syncEspnLoadedList();
   syncLeagues();
   renderGameday();
+  espnStatus(getEspnList().length ? `Removed ${leagueId}. ${getEspnList().length} ESPN league(s) still loaded.` : "No ESPN leagues loaded. Add one above.");
+}
+
+function selectedEspnTeam(d) {
+  if (!d || !Array.isArray(d.teams) || d.teams.length === 0) return null;
+  return d.teams.find((t) => String(t.id) === String(d.selectedTeamId)) || d.teams[0];
+}
+
+function renderEspn() {
+  if (espnDataById.size === 0) return;
+  // Clear stale ESPN cards, then re-render one card per loaded league.
+  for (const key of [...leagueStore.keys()]) {
+    if (key.startsWith("espn:")) leagueStore.delete(key);
+  }
+  for (const d of getEspnList()) {
+    const team = selectedEspnTeam(d);
+    if (!team) continue;
+    const card = renderEspnCard({
+      leagueId: d.leagueId,
+      leagueName: d.leagueName,
+      season: d.season,
+      week: d.week,
+      team,
+      teams: d.teams,
+      members: d.members,
+      schedule: d.schedule,
+    });
+    tagCard(card, "espn", "ESPN");
+    const key = `espn:${d.leagueId}`;
+    leagueStore.set(key, { key, platform: "espn", name: d.leagueName, card });
+  }
+  syncLeagues();
+  renderGameday();
+}
+
+function resolveEspnWeek(typedWeek, autoWeek) {
+  // Q1: week is automatic. Priority: typed input > Sleeper week (gdWeek) >
+  // ESPN status currentMatchupPeriod > 1. The input stays blank for auto.
+  const typed = parseInt(typedWeek, 10);
+  if (typed && typed >= 1) return typed;
+  if (gdWeek && gdWeek >= 1) return gdWeek;
+  if (autoWeek && autoWeek >= 1) return autoWeek;
+  return 1;
 }
 
 async function loadEspn() {
@@ -698,22 +857,17 @@ async function loadEspn() {
   try {
     localStorage.setItem("espn_league", leagueId);
     localStorage.setItem("espn_season", season);
-    if (espnSwidInput.value.trim()) localStorage.setItem("espn_swid", espnSwidInput.value.trim());
-    if (espnS2Input.value.trim()) localStorage.setItem("espn_s2", espnS2Input.value.trim());
-  } catch (e) { /* private-mode browser: persistence optional */ }
+  } catch (e) { /* incognito browser: persistence optional */ }
 
   espnStatus(`Contacting ESPN for league ${leagueId}…`);
   console.log("[FantasyCast] ESPN load", { leagueId, season });
   try {
-    // Week auto-detect from league status unless the user typed one.
-    let week = parseInt(espnWeekInput.value, 10);
     const st = await espnApi(season, leagueId, ["mStatus"]);
     const autoWeek = st.status && st.status.currentMatchupPeriod;
-    if (!week || week < 1) {
-      week = autoWeek || 1;
-      espnWeekInput.value = week;
-    }
-    espnStatus(`Loading week ${week} roster…`);
+    const week = resolveEspnWeek(espnWeekInput.value, autoWeek);
+    if (!espnWeekInput.value) espnWeekInput.value = week;
+    const weekNote = gdWeek && week === gdWeek ? " (from Sleeper week)" : "";
+    espnStatus(`Loading week ${week} roster${weekNote}…`);
     let boxErr = "";
     const [league, box] = await Promise.all([
       espnApi(season, leagueId, ["mTeam", "mRoster", "mSettings"], { scoringPeriodId: week }),
@@ -727,8 +881,17 @@ async function loadEspn() {
     if (teams.length === 0) throw new Error("ESPN returned no teams. Check League ID / season.");
     const leagueName = (league.settings && league.settings.name) || `ESPN League ${leagueId}`;
 
-    // Populate team picker, keep previous selection when possible.
-    const prevTeam = espnTeamInput.value || localStorage.getItem("espn_team") || "";
+    // Team selection: keep per-league pick when re-adding; otherwise fall
+    // back to the global picker / saved team for a familiar single-league UX.
+    const existing = espnDataById.get(String(leagueId));
+    const prevTeam = (existing && existing.selectedTeamId)
+      || espnTeamInput.value
+      || (() => { try { return localStorage.getItem("espn_team") || ""; } catch (e) { return ""; } })();
+    let selectedTeamId = prevTeam && teams.some((t) => String(t.id) === String(prevTeam))
+      ? String(prevTeam)
+      : String(teams[0].id);
+
+    // Keep the global "My team" picker populated for single-league users.
     espnTeamInput.innerHTML = "";
     for (const t of teams) {
       const opt = document.createElement("option");
@@ -737,24 +900,41 @@ async function loadEspn() {
       opt.textContent = `${t.name || t.abbrev || `Team ${t.id}`}${owner ? ` (${owner})` : ""}`;
       espnTeamInput.appendChild(opt);
     }
-    if (prevTeam && teams.some((t) => String(t.id) === String(prevTeam))) espnTeamInput.value = prevTeam;
+    espnTeamInput.value = selectedTeamId;
 
-    lastEspn = { leagueId, leagueName, season, week, teams, members: league.members || [], schedule: null, boxscore: box && box.schedule ? box.schedule : [], boxscoreError: boxErr };
+    const entry = {
+      leagueId: String(leagueId), leagueName, season, week, teams,
+      members: league.members || [], schedule: (existing && existing.schedule) || null,
+      boxscore: box && box.schedule ? box.schedule : [], boxscoreError: boxErr,
+      selectedTeamId,
+    };
+    espnDataById.set(String(leagueId), entry);
+    lastEspn = entry;
+    persistEspnLeagues();
+    syncEspnLoadedList();
     // If the week-scoped boxscore has no entry for my team, try the
     // full-season schedule to at least identify the opponent.
-    await backfillEspnMatchupItem();
+    await backfillEspnMatchupItem(entry);
     renderEspn();
     espnStatus(`Showing ${leagueName}. Loading game times…`);
 
-    const schedule = await getSchedule(season, week, "regular").catch((e) => {
-      console.error("Schedule fetch failed", e);
-      return null;
-    });
-    lastEspn.schedule = schedule;
+    // Reuse the Sleeper schedule when week/season already match (avoids a
+    // duplicate ESPN scoreboard fetch); otherwise fetch this league's week.
+    let schedule = null;
+    if (gdSchedule && Number(gdSchedule.week) === Number(week) && String(gdSeason) === String(season)) {
+      schedule = gdSchedule;
+    } else {
+      schedule = await getSchedule(season, week, "regular").catch((e) => {
+        console.error("Schedule fetch failed", e);
+        return null;
+      });
+    }
+    entry.schedule = schedule;
     renderEspn();
     renderGameday();
-    espnStatus(`Showing ${leagueName} · week ${week} (${teams.length} teams).${schedule ? "" : " Game times unavailable."}`);
-    try { localStorage.setItem("espn_team", espnTeamInput.value); } catch (e) {}
+    const total = espnDataById.size;
+    espnStatus(`Showing ${total} ESPN league(s) · latest: ${leagueName} · week ${week}${weekNote} (${teams.length} teams).${schedule ? "" : " Game times unavailable."}`);
+    try { localStorage.setItem("espn_team", selectedTeamId); } catch (e) {}
   } catch (err) {
     console.error("[FantasyCast] ESPN load failed", err);
     espnStatus(`Error: ${err.message}`, true);
@@ -763,17 +943,81 @@ async function loadEspn() {
 
 espnLoadBtn.addEventListener("click", loadEspn);
 espnTeamInput.addEventListener("change", () => {
+  // Global picker edits the most-recent league (single-league shortcut);
+  // per-card pickers below handle each league individually.
   try { localStorage.setItem("espn_team", espnTeamInput.value); } catch (e) {}
+  if (lastEspn && espnDataById.has(String(lastEspn.leagueId))) {
+    lastEspn.selectedTeamId = espnTeamInput.value;
+    persistEspnLeagues();
+  }
   renderEspn();
 });
 
-// Prefill saved ESPN settings (league ID / creds stay in this browser only).
-try {
-  if (localStorage.getItem("espn_league")) espnLeagueInput.value = localStorage.getItem("espn_league");
-  if (localStorage.getItem("espn_season")) espnSeasonInput.value = localStorage.getItem("espn_season");
-  if (localStorage.getItem("espn_swid")) espnSwidInput.value = localStorage.getItem("espn_swid");
-  if (localStorage.getItem("espn_s2")) espnS2Input.value = localStorage.getItem("espn_s2");
-} catch (e) {}
+// Per-card team pickers (one per ESPN league card) — event delegation so it
+// survives re-renders.
+document.addEventListener("change", (e) => {
+  const sel = e && e.target && e.target.classList && e.target.classList.contains("espn-team-picker")
+    ? e.target
+    : null;
+  if (!sel) return;
+  const lid = sel.getAttribute("data-league");
+  const d = espnDataById.get(String(lid));
+  if (!d) return;
+  d.selectedTeamId = sel.value;
+  if (lastEspn && String(lastEspn.leagueId) === String(lid)) lastEspn = d;
+  persistEspnLeagues();
+  renderEspn();
+});
+
+// Prefill saved ESPN settings (league ID stays in this browser only).
+// Supports the multi-league list ("espn_leagues") plus the legacy single key.
+function loadEspnPersistedIntoInputs() {
+  try {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem("espn_leagues") || "[]"); } catch (e) { list = []; }
+    if (Array.isArray(list) && list.length > 0 && list[0].leagueId) {
+      espnLeagueInput.value = list[0].leagueId;
+      if (list[0].season) espnSeasonInput.value = list[0].season;
+    } else if (localStorage.getItem("espn_league")) {
+      espnLeagueInput.value = localStorage.getItem("espn_league");
+    }
+    if (localStorage.getItem("espn_season")) espnSeasonInput.value = localStorage.getItem("espn_season");
+  } catch (e) {}
+}
+loadEspnPersistedIntoInputs();
+
+async function autoLoadPersistedEspnLeagues() {
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem("espn_leagues") || "[]"); } catch (e) { list = []; }
+  if ((!Array.isArray(list) || list.length === 0)) {
+    // Legacy single-league key migration.
+    try {
+      const single = localStorage.getItem("espn_league");
+      if (/^\d+$/.test(single || "")) list = [{ leagueId: single, season: localStorage.getItem("espn_season") || espnSeasonInput.value }];
+    } catch (e) {}
+  }
+  if (!Array.isArray(list) || list.length === 0) return;
+  for (const saved of list.slice(0, 5)) {
+    if (!saved || !/^\d+$/.test(String(saved.leagueId || ""))) continue;
+    espnLeagueInput.value = String(saved.leagueId);
+    if (saved.season) espnSeasonInput.value = String(saved.season);
+    // Preserve the saved team pick so the right roster shows after reload.
+    if (saved.teamId) {
+      try { localStorage.setItem("espn_team", String(saved.teamId)); } catch (e) {}
+      espnTeamInput.value = String(saved.teamId);
+    }
+    try {
+      await loadEspn();
+    } catch (e) {
+      console.warn("[FantasyCast] persisted ESPN auto-load failed", saved, e);
+    }
+  }
+  // Leave the input on the most recent league for the next manual Add.
+  try {
+    const last = list[list.length - 1];
+    if (last && last.leagueId) espnLeagueInput.value = String(last.leagueId);
+  } catch (e) {}
+}
 
 // Collapsible setup panel (state persists across visits).
 const panelEl = document.getElementById("control-panel");
@@ -960,19 +1204,20 @@ function findEspnBoxItem(boxList, myTeamId, week) {
 // (no scoringPeriodId) and append my team's week entry to the boxscore
 // list. Only identifies the opponent (live per-player points still need
 // the week boxscore); the roster fallback then supplies their starters.
-async function backfillEspnMatchupItem() {
-  if (!lastEspn || !Array.isArray(lastEspn.teams) || lastEspn.teams.length === 0) return false;
-  const myId = String(espnTeamInput.value || (lastEspn.teams[0] && lastEspn.teams[0].id));
-  if (findEspnBoxItem(lastEspn.boxscore, myId, lastEspn.week)) return false;
+async function backfillEspnMatchupItem(entry) {
+  const target = entry || lastEspn;
+  if (!target || !Array.isArray(target.teams) || target.teams.length === 0) return false;
+  const myId = String(target.selectedTeamId || (target.teams[0] && target.teams[0].id));
+  if (findEspnBoxItem(target.boxscore, myId, target.week)) return false;
   try {
-    const full = await espnApi(lastEspn.season, lastEspn.leagueId, ["mMatchup"]);
+    const full = await espnApi(target.season, target.leagueId, ["mMatchup"]);
     const sched = full && full.schedule;
     if (!Array.isArray(sched) || sched.length === 0) return false;
     const containsMe = (s) => {
       const [h, a] = espnSchedIds(s);
       return h === myId || a === myId;
     };
-    const hit = sched.find((s) => Number(s.matchupPeriodId) === Number(lastEspn.week) && containsMe(s))
+    const hit = sched.find((s) => Number(s.matchupPeriodId) === Number(target.week) && containsMe(s))
       || sched.find(containsMe);
     if (!hit) {
       const summarize = (list) => (list || []).slice(0, 8).map((s) => {
@@ -980,21 +1225,22 @@ async function backfillEspnMatchupItem() {
         return { mp: s.matchupPeriodId, h, a };
       });
       console.warn("[FantasyCast] ESPN matchup debug: my team in no schedule entry", {
+        leagueId: target.leagueId,
         myTeamId: myId,
         myTeamIdType: typeof myId,
-        week: lastEspn.week,
-        season: lastEspn.season,
-        leagueTeamIds: (lastEspn.teams || []).map((t) => t.id),
-        weekBoxscoreEntries: summarize(lastEspn.boxscore),
-        weekBoxscoreCount: (lastEspn.boxscore || []).length,
+        week: target.week,
+        season: target.season,
+        leagueTeamIds: (target.teams || []).map((t) => t.id),
+        weekBoxscoreEntries: summarize(target.boxscore),
+        weekBoxscoreCount: (target.boxscore || []).length,
         seasonEntriesSample: summarize(sched),
         seasonEntriesCount: sched.length,
         firstSeasonEntryKeys: sched[0] ? Object.keys(sched[0]) : [],
       });
       return false;
     }
-    lastEspn.boxscore = [...(lastEspn.boxscore || []), hit];
-    console.log("[FantasyCast] ESPN backfill: opponent identified from season schedule");
+    target.boxscore = [...(target.boxscore || []), hit];
+    console.log("[FantasyCast] ESPN backfill: opponent identified from season schedule", target.leagueId);
     return true;
   } catch (e) {
     console.warn("[FantasyCast] ESPN full-season matchup backfill failed", e);
@@ -1002,42 +1248,49 @@ async function backfillEspnMatchupItem() {
   }
 }
 
-function collectEspnEntries() {
+async function backfillAllEspn() {
+  for (const d of getEspnList()) {
+    await backfillEspnMatchupItem(d);
+  }
+}
+
+function collectEspnEntriesFor(d) {
   const out = [];
-  if (!lastEspn || !Array.isArray(lastEspn.teams) || lastEspn.teams.length === 0) return out;
-  if (getHiddenLeagues().has(`espn:${lastEspn.leagueId}`)) return out;
-  const chopped = isChoppedLeague(lastEspn.leagueName); // include my starters, just no opponents
-  const myId = String(espnTeamInput.value || (lastEspn.teams[0] && lastEspn.teams[0].id));
-  const myTeam = lastEspn.teams.find((t) => String(t.id) === myId) || lastEspn.teams[0];
-  const leagueName = lastEspn.leagueName;
-  const boxList = Array.isArray(lastEspn.boxscore) ? lastEspn.boxscore : [];
-  const item = findEspnBoxItem(boxList, myTeam.id, lastEspn.week);
+  if (!d || !Array.isArray(d.teams) || d.teams.length === 0) return out;
+  if (getHiddenLeagues().has(`espn:${d.leagueId}`)) return out;
+  const chopped = isChoppedLeague(d.leagueName); // include my starters, just no opponents
+  const myTeam = selectedEspnTeam(d);
+  if (!myTeam) return out;
+  const myId = String(myTeam.id);
+  const leagueName = d.leagueName;
+  const boxList = Array.isArray(d.boxscore) ? d.boxscore : [];
+  const item = findEspnBoxItem(boxList, myTeam.id, d.week);
   const [itemHomeId, itemAwayId] = espnSchedIds(item);
   const isHome = item && itemHomeId === String(myTeam.id);
   const myBox = item ? (isHome ? item.home : item.away) : null;
   const oppBox = item ? (isHome ? item.away : item.home) : null;
   const oppTeamId = item ? (isHome ? itemAwayId : itemHomeId) : null;
-  const oppTeam = (lastEspn.teams || []).find((t) => String(t.id) === String(oppTeamId));
+  const oppTeam = (d.teams || []).find((t) => String(t.id) === String(oppTeamId));
   const isStarter = (e) => e.lineupSlotId !== 20 && e.lineupSlotId !== 21;
   if (myBox && myBox.rosterForCurrentScoringPeriod) {
     for (const e of (myBox.rosterForCurrentScoringPeriod.entries || []).filter(isStarter).sort(espnStarterSort)) {
-      const d = espnEntryInfo(e);
+      const info = espnEntryInfo(e);
       out.push({
         leagueName, platform: "espn", side: "mine",
         teamLabel: myTeam.name || `Team ${myTeam.id}`,
         slot: ESPN_SLOT_NAMES[e.lineupSlotId] || "—",
-        playerName: d.name, pos: d.pos, nflTeam: d.nfl, fantasyPts: d.pts,
+        playerName: info.name, pos: info.pos, nflTeam: info.nfl, fantasyPts: info.pts,
       });
     }
   } else {
     // Fallback to roster view (no live points yet).
     for (const e of ((myTeam.roster && myTeam.roster.entries) || []).filter(isStarter).sort(espnStarterSort)) {
-      const d = espnEntryInfo(e);
+      const info = espnEntryInfo(e);
       out.push({
         leagueName, platform: "espn", side: "mine",
         teamLabel: myTeam.name || `Team ${myTeam.id}`,
         slot: ESPN_SLOT_NAMES[e.lineupSlotId] || "—",
-        playerName: d.name, pos: d.pos, nflTeam: d.nfl, fantasyPts: null,
+        playerName: info.name, pos: info.pos, nflTeam: info.nfl, fantasyPts: null,
       });
     }
   }
@@ -1045,27 +1298,35 @@ function collectEspnEntries() {
     const oppLabel = (oppTeam && oppTeam.name) || (oppTeamId ? `Team ${oppTeamId}` : "Opponent");
     if (oppBox && oppBox.rosterForCurrentScoringPeriod) {
       for (const e of (oppBox.rosterForCurrentScoringPeriod.entries || []).filter(isStarter).sort(espnStarterSort)) {
-        const d = espnEntryInfo(e);
+        const info = espnEntryInfo(e);
         out.push({
           leagueName, platform: "espn", side: "opp",
           teamLabel: oppLabel,
           slot: ESPN_SLOT_NAMES[e.lineupSlotId] || "—",
-          playerName: d.name, pos: d.pos, nflTeam: d.nfl, fantasyPts: d.pts,
+          playerName: info.name, pos: info.pos, nflTeam: info.nfl, fantasyPts: info.pts,
         });
       }
     } else if (oppTeam && oppTeam.roster && Array.isArray(oppTeam.roster.entries)) {
       // Boxscore missing (not yet live / fetch failed): fall back to the
       // opponent's roster starters so the matchup still shows both sides.
       for (const e of oppTeam.roster.entries.filter(isStarter).sort(espnStarterSort)) {
-        const d = espnEntryInfo(e);
+        const info = espnEntryInfo(e);
         out.push({
           leagueName, platform: "espn", side: "opp",
           teamLabel: oppLabel,
           slot: ESPN_SLOT_NAMES[e.lineupSlotId] || "—",
-          playerName: d.name, pos: d.pos, nflTeam: d.nfl, fantasyPts: null,
+          playerName: info.name, pos: info.pos, nflTeam: info.nfl, fantasyPts: null,
         });
       }
     }
+  }
+  return out;
+}
+
+function collectEspnEntries() {
+  const out = [];
+  for (const d of getEspnList()) {
+    out.push(...collectEspnEntriesFor(d));
   }
   return out;
 }
@@ -1233,20 +1494,22 @@ function buildSleeperMatchup(leagueKey, sched) {
 }
 
 function buildEspnMatchup(leagueKey, sched) {
-  if (!lastEspn || `espn:${lastEspn.leagueId}` !== leagueKey) return null;
-  if (!Array.isArray(lastEspn.teams) || lastEspn.teams.length === 0) return null;
-  const leagueName = lastEspn.leagueName;
-  const chopped = isChoppedLeague(lastEspn.leagueName);
-  const myId = String(espnTeamInput.value || (lastEspn.teams[0] && lastEspn.teams[0].id));
-  const myTeam = lastEspn.teams.find((t) => String(t.id) === myId) || lastEspn.teams[0];
-  const boxList = Array.isArray(lastEspn.boxscore) ? lastEspn.boxscore : [];
-  const item = findEspnBoxItem(boxList, myTeam.id, lastEspn.week);
+  const lid = String(leagueKey || "").replace(/^espn:/, "");
+  const d = espnDataById.get(lid) || (lastEspn && String(lastEspn.leagueId) === lid ? lastEspn : null);
+  if (!d) return null;
+  if (!Array.isArray(d.teams) || d.teams.length === 0) return null;
+  const leagueName = d.leagueName;
+  const chopped = isChoppedLeague(d.leagueName);
+  const myTeam = selectedEspnTeam(d);
+  if (!myTeam) return null;
+  const boxList = Array.isArray(d.boxscore) ? d.boxscore : [];
+  const item = findEspnBoxItem(boxList, myTeam.id, d.week);
   const [itemHomeId, itemAwayId] = espnSchedIds(item);
   const isHome = item && itemHomeId === String(myTeam.id);
   const myBox = item ? (isHome ? item.home : item.away) : null;
   const oppBox = item ? (isHome ? item.away : item.home) : null;
   const oppTeamId = item ? (isHome ? itemAwayId : itemHomeId) : null;
-  const oppTeam = (lastEspn.teams || []).find((t) => String(t.id) === String(oppTeamId));
+  const oppTeam = (d.teams || []).find((t) => String(t.id) === String(oppTeamId));
   const isStarter = (e) => e.lineupSlotId !== 20 && e.lineupSlotId !== 21;
   const toEntry = (e) => {
     const dd = espnEntryInfo(e);
@@ -1275,7 +1538,7 @@ function buildEspnMatchup(leagueKey, sched) {
   let oppReason = "ok";
   if (chopped) oppReason = "chopped";
   else if (opp.length > 0) oppReason = "ok";
-  else if (!item) oppReason = (boxList.length === 0 ? (lastEspn.boxscoreError ? "boxscore-error" : "boxscore-empty") : "no-matchup");
+  else if (!item) oppReason = (boxList.length === 0 ? (d.boxscoreError ? "boxscore-error" : "boxscore-empty") : "no-matchup");
   else oppReason = "no-opp-starters";
   return { leagueName, platform: "espn", myLabel: myTeam.name || `Team ${myTeam.id}`, oppLabel, chopped, my, opp, oppReason };
 }
@@ -1325,7 +1588,7 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
     if (m.chopped) return `no opponent (${choppedKind(m.leagueName)})`;
     switch (m.oppReason) {
       case "boxscore-error":
-        return "opponent unavailable (ESPN matchup data failed to load — private league? check SWID + espn_s2, then Refresh scores)";
+        return "opponent unavailable (ESPN matchup data failed to load — hit Refresh scores)";
       case "boxscore-empty":
         return "opponent unavailable (ESPN returned no matchup data — hit Refresh scores)";
       case "no-matchup":
@@ -1343,10 +1606,13 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
     const warnKey = `${gdMatchupLeagueKey}|${weekLabel}|${m.oppReason}`;
     if (warnKey !== lastOppWarnKey) {
       lastOppWarnKey = warnKey;
+      const espnDbg = gdMatchupLeagueKey.startsWith("espn:")
+        ? espnDataById.get(gdMatchupLeagueKey.replace(/^espn:/, ""))
+        : null;
       console.warn("[FantasyCast] matchup opponent missing", {
         league: m.leagueName, platform: m.platform, reason: m.oppReason,
-        week: weekLabel, boxscoreEntries: lastEspn && lastEspn.boxscore ? lastEspn.boxscore.length : null,
-        boxscoreError: (lastEspn && lastEspn.boxscoreError) || null,
+        week: weekLabel, boxscoreEntries: espnDbg && espnDbg.boxscore ? espnDbg.boxscore.length : null,
+        boxscoreError: (espnDbg && espnDbg.boxscoreError) || null,
       });
     }
   }
@@ -1386,6 +1652,21 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
   wrap.appendChild(card);
 }
 
+function firstEspnSchedule() {
+  for (const d of getEspnList()) {
+    if (d.schedule) return d.schedule;
+  }
+  return null;
+}
+
+function firstEspnWeek() {
+  if (lastEspn && lastEspn.week) return lastEspn.week;
+  for (const d of getEspnList()) {
+    if (d.week) return d.week;
+  }
+  return null;
+}
+
 function renderGameday() {
   const wrap = document.getElementById("gameday");
   const status = document.getElementById("gameday-status");
@@ -1393,16 +1674,16 @@ function renderGameday() {
   // Runs on every render so the League picker hides/shows with the mode
   // no matter which path (tab switch, toggle, refresh) got us here.
   syncGamedayLeaguePicker();
-  const sched = gdSchedule || (lastEspn && lastEspn.schedule) || null;
+  const sched = gdSchedule || firstEspnSchedule() || null;
   if (sched && !gdSchedule) gdSchedule = sched;
-  const weekLabel = gdWeek || (lastEspn && lastEspn.week) || "—";
+  const weekLabel = gdWeek || firstEspnWeek() || "—";
   if (gdGroupMode === "matchup") {
     renderGamedayMatchup(wrap, status, gdSchedule, weekLabel);
     return;
   }
   const entries = [...collectSleeperEntries(), ...collectEspnEntries()];
   if (entries.length === 0) {
-    status.textContent = gdSleeperData.length === 0 && !lastEspn
+    status.textContent = gdSleeperData.length === 0 && espnDataById.size === 0
       ? "Load your leagues first, then open this tab."
       : "No starters found for GameDay (matchups haven't loaded yet, or all visible leagues are on bye).";
     wrap.innerHTML = "";
@@ -1431,7 +1712,7 @@ function renderGameday() {
     const db = b[1].game ? b[1].game.date.getTime() : Infinity;
     return da - db;
   });
-  status.textContent = `Week ${weekLabel} · ${entries.length} starters (you + opponents) across ${sorted.length} NFL game group(s). Scores refresh with “Refresh scores”. Half-PPR comparable; per-league live scoring shown.`;
+  status.textContent = `Week ${weekLabel} · ${entries.length} starters (you + opponents) across ${sorted.length} NFL games. Scores refresh with “Refresh scores”. Half-PPR comparable; per-league live scoring shown.`;
 
   const gameTitle = (g) => {
     // ESPN returns 0-0 for pre-game scores — suppress until kickoff.
@@ -1505,7 +1786,7 @@ async function refreshGameday() {
   const status = document.getElementById("gameday-status");
   try {
     if (status) status.textContent = "Refreshing live scores + fantasy points…";
-    const week = gdWeek || (lastEspn && lastEspn.week) || 1;
+    const week = gdWeek || firstEspnWeek() || 1;
     const season = gdSeason || (lastEspn && lastEspn.season) || new Date().getFullYear();
     // Bypass the getSchedule memory cache so scores actually update.
     scheduleCache = { key: null, data: null };
@@ -1515,7 +1796,7 @@ async function refreshGameday() {
     });
     if (fresh) {
       gdSchedule = fresh;
-      if (lastEspn) lastEspn.schedule = fresh;
+      for (const d of getEspnList()) d.schedule = fresh;
     }
     await Promise.all(
       gdSleeperData.map(async (d) => {
@@ -1526,20 +1807,21 @@ async function refreshGameday() {
         }
       })
     );
-    if (lastEspn) {
+    for (const d of getEspnList()) {
       try {
-        const box = await espnApi(lastEspn.season, lastEspn.leagueId, ["mMatchup", "mBoxscore"], { scoringPeriodId: lastEspn.week });
+        const box = await espnApi(d.season, d.leagueId, ["mMatchup", "mBoxscore"], { scoringPeriodId: d.week });
         if (box && box.schedule) {
-          lastEspn.boxscore = box.schedule;
-          lastEspn.boxscoreError = "";
+          d.boxscore = box.schedule;
+          d.boxscoreError = "";
         }
       } catch (e) {
-        console.warn("GameDay ESPN boxscore refresh failed", e);
-        lastEspn.boxscoreError = (e && e.message) || String(e);
+        console.warn(`GameDay ESPN boxscore refresh failed for ${d.leagueName}`, e);
+        d.boxscoreError = (e && e.message) || String(e);
       }
-      await backfillEspnMatchupItem();
+      await backfillEspnMatchupItem(d);
     }
     // Re-render league cards too so game pills pick up fresh times.
+    renderEspn();
     renderGameday();
     if (status && status.textContent.startsWith("Refreshing")) renderGameday();
   } catch (e) {
@@ -1572,12 +1854,10 @@ if (gdLeagueInput) {
 console.log("[FantasyCast] app.js loaded, scheduling initial loads");
 setStatus("Starting… if this never changes, app.js failed to run (hard-refresh Ctrl+Shift+R).");
 setTimeout(load, 50);
-// ESPN auto-loads too, but only when a league ID was saved from a previous
+// ESPN auto-loads too, but only when league ID(s) were saved from a previous
 // visit — otherwise the ESPN panel keeps its "enter a League ID" prompt.
 setTimeout(() => {
-  try {
-    if (/^\d+$/.test(espnLeagueInput.value.trim())) loadEspn();
-  } catch (e) {
+  autoLoadPersistedEspnLeagues().catch((e) => {
     console.warn("[FantasyCast] ESPN auto-load skipped", e);
-  }
+  });
 }, 300);

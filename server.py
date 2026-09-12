@@ -2,10 +2,8 @@
 """FantasyCast local server (stdlib only, no dependencies).
 
 - Serves the static app (index.html / app.js / styles.css) from this folder.
-- Proxies ESPN fantasy API calls at /api/espn so that:
-    * browser CORS issues are avoided (same-origin request), and
-    * private leagues work by forwarding pasted espn_s2 / SWID cookies
-      server-side (browsers forbid setting Cookie headers from JS).
+- Proxies public ESPN fantasy API calls at /api/espn so browser CORS
+  issues are avoided (same-origin request).
 
 Usage:
     python server.py [port]   (default 8123)
@@ -41,7 +39,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "X-ESPN-S2, X-ESPN-SWID, Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -85,13 +83,6 @@ class Handler(SimpleHTTPRequestHandler):
             "Accept": "application/json",
             "Referer": "https://fantasy.espn.com/",
         }
-        espn_s2 = self.headers.get("X-ESPN-S2", "").strip()
-        swid = self.headers.get("X-ESPN-SWID", "").strip()
-        if espn_s2 or swid:
-            cookie = "; ".join(
-                [f"espn_s2={espn_s2}" if espn_s2 else "", f"SWID={swid}" if swid else ""]
-            ).strip("; ")
-            headers["Cookie"] = cookie
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=25) as resp:
@@ -110,7 +101,7 @@ class Handler(SimpleHTTPRequestHandler):
                 detail = ""
             self._send_json(e.code, {
                 "error": f"ESPN returned HTTP {e.code}. "
-                         + ("League may be private — paste SWID + espn_s2. " if e.code in (401, 403) else "")
+                         + ("League may be private, which isn't supported. " if e.code in (401, 403) else "")
                          + ("Check league ID / season. " if e.code == 404 else ""),
                 "detail": detail,
             })
