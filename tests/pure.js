@@ -299,6 +299,63 @@ check("parseYahooMatchupPaste: mirrored cols, dash nulls, DEF, BN skip", () => {
   delete sandbox.__yp;
 });
 
+check("parseYahooMatchupMeta: league, teams, week; footer ignored", () => {
+  sandbox.__ym = [
+    "Fantasy Football",
+    "One league to rule them all (ID# 482639)",
+    "Yahoo Sports Fantasy Football",
+    "Week 1: Sep 9 - Sep 14",
+    "Tyler's Tip-Top Team",
+    "Tyler",
+    "0 - 0 - 0",
+    "77.86",
+    "vs.",
+    "118.86",
+    "115.68",
+    "Orig Proj",
+    "112.13",
+    "104.09",
+    "Proj Pts",
+    "143.52",
+    "Don't call it a comeback",
+    "Anthony",
+    "0 - 0 - 0",
+    "3 Players remaining",
+    "Stats\tPlayer\tProj\tFan Pts\tPos\tFan Pts\tProj\tPlayer\tStats",
+    "J. BurrowCin - QB",
+    "Final (W) 33-27 vs TB",
+    "20.30",
+    "14.16",
+    "QB",
+    "35.66",
+    "19.27",
+    "J. AllenBuf - QB",
+    "Final (W) 36-31 @ HOU",
+    "Matchups",
+    "Week 1 Matchups",
+    "Penny Wise",
+    "Brittany",
+    "0 - 0 - 0",
+    "139.04",
+  ].join("\n");
+  const meta = appJson(`parseYahooMatchupMeta(__ym)`);
+  assert.deepStrictEqual(meta, {
+    leagueName: "One league to rule them all",
+    leftTeam: "Tyler's Tip-Top Team",
+    rightTeam: "Don't call it a comeback",
+    week: 1,
+  });
+  delete sandbox.__ym;
+});
+
+check("parseYahooMatchupMeta: table-only paste yields nulls", () => {
+  sandbox.__ym2 = ["J. BurrowCin - QB", "20.30", "14.16", "QB", "35.66", "19.27", "J. AllenBuf - QB"].join("\n");
+  assert.deepStrictEqual(appJson(`parseYahooMatchupMeta(__ym2)`), {
+    leagueName: null, leftTeam: null, rightTeam: null, week: null,
+  });
+  delete sandbox.__ym2;
+});
+
 check("yahoo week gate: matching week shows, stale hidden", () => {
   vm.runInContext(`yahooDataById.clear()`, sandbox);
   vm.runInContext(`gdWeek = 1`, sandbox);

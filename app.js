@@ -1162,10 +1162,59 @@ function parseYahooMatchupPaste(text) {
   return { left, right, warnings };
 }
 
+// Header metadata from a full-page Yahoo paste. The league line looks like
+// "One league to rule them all (ID# 482639)", each side's team name sits two
+// lines above its "W-L-T" record line, week from "Week 1: ...". All fields
+// are nullable — a table-only paste yields all nulls and the form values
+// (or generic fallbacks) are used instead.
+function parseYahooMatchupMeta(text) {
+  const out = { leagueName: null, leftTeam: null, rightTeam: null, week: null };
+  const head = String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  // Only the pre-table header carries our matchup's names; the page footer
+  // repeats other matchups, so stop at the first table header row.
+  let end = head.findIndex((s) => /^stats\s+player/i.test(s));
+  if (end === -1) end = head.length;
+  const region = head.slice(0, end);
+  for (const s of region) {
+    const lm = s.match(/^(.*?)\s*\(ID#\s*\d+\)\s*$/);
+    if (lm && lm[1].trim()) { out.leagueName = lm[1].trim(); break; }
+  }
+  for (const s of region) {
+    const wm = s.match(/\bWeek\s+(\d{1,2})\b/);
+    if (wm) {
+      const w = parseInt(wm[1], 10);
+      if (w >= 1) out.week = w;
+      break;
+    }
+  }
+  const isRecord = (s) => /^\d+\s*-\s*\d+\s*-\s*\d+$/.test(s);
+  const isNameLike = (s) =>
+    s.length >= 1 && s.length <= 60 &&
+    !/^vs\.?$/i.test(s) && !/^total$/i.test(s) &&
+    !/orig proj|proj pts|players remaining|underdog|favorite|matchups/i.test(s) &&
+    !/^-?\d+\.\d{1,2}$/.test(s) && !/^[-—–]$/.test(s) &&
+    !isYahooSlotToken(s) && !parseYahooPlayerBlock(s);
+  const teams = [];
+  for (let i = 0; i < region.length; i++) {
+    if (!isRecord(region[i]) || i < 2) continue;
+    const name = region[i - 2];
+    if (isNameLike(name)) teams.push(name);
+    if (teams.length === 2) break;
+  }
+  if (teams[0]) out.leftTeam = teams[0];
+  if (teams[1]) out.rightTeam = teams[1];
+  return out;
+}
+
 // -- Store ( mirrors espnDataById pattern, app.js:760 ) --
 
 const yahooDataById = new Map(); // id -> { id, key, leagueName, week, mySide, myTeamLabel, oppTeamLabel, my, opp }
 let lastYahooParse = null; // { left, right, warnings } from the preview step
+let lastYahooMeta = null; // { leagueName, leftTeam, rightTeam, week } detected from the paste header
 
 function yahooSlug(s) {
   const slug = String(s || "league").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -1313,9 +1362,11 @@ function yahooStatus(msg, isError = false) {
   yahooStatusEl.classList.toggle("error", isError);
 }
 
-function yahooResolveWeek() {
+function yahooResolveWeek(meta) {
   const typed = parseInt(yahooWeekInput && yahooWeekInput.value, 10);
   if (typed && typed >= 1) return typed;
+  if (meta && meta.week && meta.week >= 1) return meta.week;
+  if (lastYahooMeta && lastYahooMeta.week && lastYahooMeta.week >= 1) return lastYahooMeta.week;
   const auto = yahooAutoWeek();
   if (auto && auto >= 1) return auto;
   return 1;
@@ -1424,11 +1475,6 @@ function removeYahooLeague(id) {
 }
 
 function saveYahooLeague() {
-  const leagueName = (yahooLeagueInput && yahooLeagueInput.value.trim()) || "";
-  if (!leagueName) {
-    yahooStatus("Enter a league name first (e.g. One league to rule them all).", true);
-    return;
-  }
   const paste = (yahooPasteInput && yahooPasteInput.value) || "";
   if (!paste.trim() && !lastYahooParse) {
     yahooStatus("Paste your Yahoo matchup table first, then Parse & preview.", true);
@@ -1442,20 +1488,34 @@ function saveYahooLeague() {
       return;
     }
   }
+  // Header meta: cached from the Parse step, else detected fresh now.
+  // League / team names are optional — detected values, then fallbacks.
+  let meta = lastYahooMeta;
+  if ((!meta || (!meta.leagueName && !meta.leftTeam && !meta.week)) && paste.trim()) {
+    try {
+      meta = parseYahooMatchupMeta(paste);
+      lastYahooMeta = meta;
+    } catch (e) { meta = lastYahooMeta; }
+  }
+  const leagueName = (yahooLeagueInput && yahooLeagueInput.value.trim())
+    || (meta && meta.leagueName)
+    || "Yahoo league";
   const edited = readYahooPreview() || lastYahooParse;
   if (edited.left.length === 0 && edited.right.length === 0) {
     yahooStatus(`No starters parsed. ${(edited.warnings || []).join(" ")}`, true);
     renderYahooPreview();
     return;
   }
-  const week = yahooResolveWeek();
+  const week = yahooResolveWeek(meta);
   const mySide = (yahooSideInput && yahooSideInput.value === "right") ? "right" : "left";
-  const myTeamLabel = (mySide === "left"
-    ? ((yahooMyTeamInput && yahooMyTeamInput.value.trim()) || "Left team")
-    : ((yahooMyTeamInput && yahooMyTeamInput.value.trim()) || "Right team"));
-  const oppTeamLabel = (mySide === "left"
-    ? ((yahooOppTeamInput && yahooOppTeamInput.value.trim()) || "Right team")
-    : ((yahooOppTeamInput && yahooOppTeamInput.value.trim()) || "Left team"));
+  const metaMy = meta ? (mySide === "left" ? meta.leftTeam : meta.rightTeam) : null;
+  const metaOpp = meta ? (mySide === "left" ? meta.rightTeam : meta.leftTeam) : null;
+  const myTeamLabel = (yahooMyTeamInput && yahooMyTeamInput.value.trim())
+    || metaMy
+    || (mySide === "left" ? "Left team" : "Right team");
+  const oppTeamLabel = (yahooOppTeamInput && yahooOppTeamInput.value.trim())
+    || metaOpp
+    || (mySide === "left" ? "Right team" : "Left team");
   const my = (mySide === "left" ? edited.left : edited.right).map((r) => ({ ...r }));
   const opp = (mySide === "left" ? edited.right : edited.left).map((r) => ({ ...r }));
   const id = `${yahooSlug(leagueName)}-w${week}`;
@@ -1510,15 +1570,35 @@ if (yahooParseBtn) {
     }
     try {
       lastYahooParse = parseYahooMatchupPaste(paste);
+      lastYahooMeta = parseYahooMatchupMeta(paste);
     } catch (e) {
       yahooStatus(`Parse failed: ${e.message}`, true);
       return;
     }
+    // Autofill blank fields from the detected header (typed values win).
+    try {
+      const sideNow = (yahooSideInput && yahooSideInput.value === "right") ? "right" : "left";
+      if (lastYahooMeta) {
+        if (yahooLeagueInput && !yahooLeagueInput.value.trim() && lastYahooMeta.leagueName) {
+          yahooLeagueInput.value = lastYahooMeta.leagueName;
+        }
+        if (yahooWeekInput && !yahooWeekInput.value && lastYahooMeta.week) {
+          yahooWeekInput.value = lastYahooMeta.week;
+        }
+        const myName = sideNow === "left" ? lastYahooMeta.leftTeam : lastYahooMeta.rightTeam;
+        const oppName = sideNow === "left" ? lastYahooMeta.rightTeam : lastYahooMeta.leftTeam;
+        if (yahooMyTeamInput && !yahooMyTeamInput.value.trim() && myName) yahooMyTeamInput.value = myName;
+        if (yahooOppTeamInput && !yahooOppTeamInput.value.trim() && oppName) yahooOppTeamInput.value = oppName;
+      }
+    } catch (e) {}
     renderYahooPreview();
     const n = lastYahooParse.left.length + lastYahooParse.right.length;
     const warns = (lastYahooParse.warnings || []).join(" ");
+    const detected = lastYahooMeta && (lastYahooMeta.leagueName || lastYahooMeta.leftTeam)
+      ? ` Detected: ${lastYahooMeta.leagueName || "league"}${lastYahooMeta.leftTeam ? ` (${lastYahooMeta.leftTeam} vs ${lastYahooMeta.rightTeam || "?"})` : ""}${lastYahooMeta.week ? ` W${lastYahooMeta.week}` : ""}.`
+      : "";
     yahooStatus(n > 0
-      ? `Parsed ${lastYahooParse.left.length}+${lastYahooParse.right.length} starters. Check the preview, fix anything, then Save. ${warns}`
+      ? `Parsed ${lastYahooParse.left.length}+${lastYahooParse.right.length} starters.${detected} Check the preview, fix anything, then Save. ${warns}`
       : `No starters parsed. ${warns}`, n === 0);
   });
 }
