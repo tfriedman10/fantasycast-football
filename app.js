@@ -142,6 +142,16 @@ function normTeam(abbr) {
 
 let scheduleCache = { key: null, data: null };
 
+// ESPN's shortDetail often already embeds the clock ("12:55 - 4th") —
+// don't append displayClock a second time ("12:55 - 4th · 12:55").
+function withClockDetail(detail, clock, state) {
+  if (state === "in" && clock) {
+    if (detail && !detail.includes(clock)) return `${detail} · ${clock}`;
+    if (!detail) return clock;
+  }
+  return detail;
+}
+
 async function getSchedule(season, week, seasonType) {
   const espnType = seasonType === "post" ? 3 : seasonType === "pre" ? 1 : 2;
   const key = `${season}-${espnType}-${week}`;
@@ -175,8 +185,7 @@ async function getSchedule(season, week, seasonType) {
     const st = (ev.status && ev.status.type) || (comp.status && comp.status.type) || {};
     const fullStatus = ev.status || comp.status || {};
     const state = st.state || "pre"; // "pre" | "in" | "post"
-    let detail = st.shortDetail || st.description || "";
-    if (fullStatus.displayClock && state === "in") detail = `${detail} · ${fullStatus.displayClock}`.trim();
+    let detail = withClockDetail(st.shortDetail || st.description || "", fullStatus.displayClock || "", state);
     if (!detail) detail = state === "post" ? "Final" : state === "in" ? "Live" : label;
     const home = teams.find((t) => t.homeAway === "home") || teams[1];
     const away = teams.find((t) => t.homeAway === "away") || teams[0];
@@ -1381,25 +1390,25 @@ function renderYahooPreview() {
   }
   const rowHtml = (side, r, idx) => `
     <tr data-side="${side}" data-idx="${idx}">
-      <td>${side === "left" ? "Left" : "Right"}</td>
-      <td>${escHtml(r.slot)}</td>
-      <td><input class="yahoo-name" value="${escHtml(r.playerName)}" spellcheck="false" /></td>
-      <td class="player-sub">${escHtml(r.pos)}</td>
+      <td class="yahoo-slot">${escHtml(r.slot)}</td>
+      <td><input class="yahoo-name" value="${escHtml(r.playerName)}" spellcheck="false" /><div class="player-sub">${escHtml(r.pos)}</div></td>
       <td><input class="yahoo-nfl" value="${escHtml(r.nflTeam || "")}" maxlength="3" spellcheck="false" /></td>
       <td><input class="yahoo-pts" value="${r.fantasyPts != null ? r.fantasyPts : ""}" placeholder="—" inputmode="decimal" /></td>
     </tr>`;
-  const rows = [
-    ...p.left.map((r, i) => rowHtml("left", r, i)),
-    ...p.right.map((r, i) => rowHtml("right", r, i)),
-  ].join("");
+  const groupHtml = (side, rows, label) => rows.length === 0 ? "" :
+    `<tr class="yahoo-group"><td colspan="4">${escHtml(label)} (${rows.length})</td></tr>` + rows;
+  const rows = groupHtml("left", p.left.map((r, i) => rowHtml("left", r, i)), "Left")
+    + groupHtml("right", p.right.map((r, i) => rowHtml("right", r, i)), "Right");
   const warns = (p.warnings || []).map((w) => `<div class="player-sub">⚠ ${escHtml(w)}</div>`).join("");
   yahooPreviewEl.innerHTML = `
     <div class="player-sub">Preview (editable — fix names/teams/points before saving; projections dropped):</div>
     ${warns}
+    <div class="yahoo-preview-scroll">
     <table class="yahoo-preview-table">
-      <thead><tr><th>Side</th><th>Slot</th><th>Player</th><th>Pos</th><th>NFL</th><th>Fan</th></tr></thead>
+      <thead><tr><th class="yahoo-slot">Slot</th><th>Player</th><th class="yahoo-nflcol">NFL</th><th class="yahoo-fancol">Fan</th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`;
+    </table>
+    </div>`;
 }
 
 function readYahooPreview() {
@@ -1994,19 +2003,32 @@ function minutesRemainingForGame(game) {
   return clockMins != null ? Math.max(0, clockMins) : 0;
 }
 
+// Matchup rows show the game on two lines: score first, then clock/status.
+// Finals need no minutes (obvious) and pre-game needs none either —
+// minutes only ever appear on the live status line.
+function gameScoreLine(game) {
+  if (!game) return "Bye";
+  if (game.state !== "pre" && game.awayScore != null && game.homeScore != null) {
+    return `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore}`;
+  }
+  return `${game.away} @ ${game.home}`;
+}
+
+function gameStatusLine(game) {
+  if (!game || game.state === "post") return "";
+  if (game.state === "in") {
+    const mins = fmtMinsSuffix(minutesRemainingForGame(game)).replace(/^ · /, "");
+    return game.detail ? (mins ? `${game.detail} · ${mins}` : game.detail) : mins;
+  }
+  return game.label || "";
+}
+
 // Plain game score/state line for matchup rows (no special-window highlight).
 function gameLineFor(game) {
   if (!game) return "Bye";
-  if (game.state === "pre") return `${game.away} @ ${game.home} · ${game.label}`;
-  if (game.state === "post") {
-    if (game.awayScore != null && game.homeScore != null) return `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} · Final`;
-    return `${game.away} @ ${game.home} · Final`;
-  }
-  // Live
-  const score = game.awayScore != null && game.homeScore != null
-    ? `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore}`
-    : `${game.away} @ ${game.home}`;
-  return game.detail ? `${score} · ${game.detail}` : score;
+  if (game.state === "post") return `${gameScoreLine(game)} · Final`;
+  const st = gameStatusLine(game);
+  return st ? `${gameScoreLine(game)} · ${st}` : gameScoreLine(game);
 }
 
 function matchupGameFor(nflTeam, sched) {
@@ -2149,6 +2171,12 @@ function fmtMins(n) {
   return `${r} min left`;
 }
 
+// Finals (and byes) have no minutes left to show — suffix is for live/pre only.
+function fmtMinsSuffix(n) {
+  const r = Math.round(Number(n) || 0);
+  return r > 0 ? ` · ${r} min left` : "";
+}
+
 let lastOppWarnKey = "";
 
 function renderGamedayMatchup(wrap, status, sched, weekLabel) {
@@ -2206,12 +2234,16 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
     }
   }
 
-  const rowHtml = (e) => {
-    const mins = minutesRemainingForGame(e.game);
+  const rowHtml = (e, side) => {
+    const statusLine = gameStatusLine(e.game);
+    const scoreLine = e.game && e.game.state === "post"
+      ? `${gameScoreLine(e.game)} · Final`
+      : gameScoreLine(e.game);
     return `<div class="mu-player">
-      <div class="mu-line1"><span class="slot-inline">${escHtml(e.slot)}</span><span class="player-name">${escHtml(e.playerName)}</span><span class="fpts-cell">${matchupDisplayPts(e)}</span></div>
+      <div class="mu-line1"><span class="side ${side} mu-side-chip">${side === "mine" ? "ME" : "OPP"}</span><span class="slot-inline">${escHtml(e.slot)}</span><span class="player-name">${escHtml(e.playerName)}</span><span class="fpts-cell">${matchupDisplayPts(e)}</span></div>
       <div class="player-sub">${escHtml(e.pos)} · ${escHtml(e.nflTeam || "—")}</div>
-      <div class="player-sub mu-game">${escHtml(gameLineFor(e.game))} · ${fmtMins(mins)}</div>
+      <div class="player-sub mu-game">${escHtml(scoreLine)}</div>
+      ${statusLine ? `<div class="player-sub mu-game">${escHtml(statusLine)}</div>` : ""}
     </div>`;
   };
 
@@ -2220,7 +2252,7 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
   for (let i = 0; i < n; i++) {
     const me = m.my[i];
     const op = hasOpp ? m.opp[i] : undefined;
-    rows += `<tr class="mu-row"><td class="mu-cell mine">${me ? rowHtml(me) : `<span class="empty">—</span>`}</td><td class="mu-cell opp">${op ? rowHtml(op) : `<span class="empty">—</span>`}</td></tr>`;
+    rows += `<tr class="mu-row"><td class="mu-cell mine">${me ? rowHtml(me, "mine") : `<span class="empty">—</span>`}</td><td class="mu-cell opp">${op ? rowHtml(op, "opp") : `<span class="empty">—</span>`}</td></tr>`;
   }
 
   wrap.innerHTML = "";
@@ -2228,9 +2260,9 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
   card.className = "gd-game mu-card";
   card.innerHTML = `
     <div class="mu-header">
-      <div class="mu-team mine"><div class="mu-team-name">${escHtml(m.myLabel)}</div><div class="mu-team-score">${fmtPts(myPts)} <span class="player-sub">· ${fmtMins(myMins)}</span></div></div>
+      <div class="mu-team mine"><div class="mu-team-name">${escHtml(m.myLabel)}</div><div class="mu-team-score">${fmtPts(myPts)}${fmtMinsSuffix(myMins) ? `<span class="player-sub">${escHtml(fmtMinsSuffix(myMins))}</span>` : ""}</div></div>
       <div class="mu-vs">vs</div>
-      <div class="mu-team opp">${hasOpp ? `<div class="mu-team-name">${escHtml(m.oppLabel)}</div><div class="mu-team-score">${fmtPts(oppPts)} <span class="player-sub">· ${fmtMins(oppMins)}</span></div>` : `<div class="mu-team-name empty">${m.chopped ? `No opponent (${choppedKind(m.leagueName)})` : escHtml(oppUnavailableText())}</div>`}</div>
+      <div class="mu-team opp">${hasOpp ? `<div class="mu-team-name">${escHtml(m.oppLabel)}</div><div class="mu-team-score">${fmtPts(oppPts)}${fmtMinsSuffix(oppMins) ? `<span class="player-sub">${escHtml(fmtMinsSuffix(oppMins))}</span>` : ""}</div>` : `<div class="mu-team-name empty">${m.chopped ? `No opponent (${choppedKind(m.leagueName)})` : escHtml(oppUnavailableText())}</div>`}</div>
     </div>
     <div class="gd-body">
       <table class="mu-table">

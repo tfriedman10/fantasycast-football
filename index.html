@@ -76,9 +76,16 @@
           <h3>Yahoo (manual)</h3>
           <p class="espn-hint">Private leagues welcome — no login needed. On Yahoo web, open your matchup, copy the whole page, and paste it below. GameDay only (no Lineups card). League name, week, and team names are auto-detected from a full-page paste — leave any field blank to use the detected value. Fan Pts only, no projections. Only shows when the saved week matches the current week — re-paste weekly.</p>
           <div class="controls">
+            <label style="flex:1 1 100%">
+              Matchup paste
+              <textarea id="yahoo-paste-input" rows="5" placeholder="Paste the Yahoo matchup page here — league, week, and team names fill in below"></textarea>
+            </label>
+            <button id="yahoo-parse-btn" type="button">Parse &amp; preview</button>
+          </div>
+          <div class="controls" style="margin-top:8px">
             <label>
               League name
-              <input id="yahoo-league-input" type="text" placeholder="e.g. One league to rule them all" spellcheck="false" />
+              <input id="yahoo-league-input" type="text" placeholder="(auto from paste)" spellcheck="false" />
             </label>
             <label>
               Week
@@ -93,21 +100,12 @@
             </label>
             <label>
               My team
-              <input id="yahoo-my-team-input" type="text" placeholder="(optional)" spellcheck="false" />
+              <input id="yahoo-my-team-input" type="text" placeholder="(auto from paste)" spellcheck="false" />
             </label>
             <label>
               Opponent
-              <input id="yahoo-opp-team-input" type="text" placeholder="(optional)" spellcheck="false" />
+              <input id="yahoo-opp-team-input" type="text" placeholder="(auto from paste)" spellcheck="false" />
             </label>
-          </div>
-          <div class="controls" style="margin-top:8px">
-            <label style="flex:1 1 100%">
-              Matchup paste
-              <textarea id="yahoo-paste-input" rows="5" placeholder="Paste the Yahoo matchup table here (Stats Player Proj Fan Pts Pos Fan Pts Proj Player Stats …)"></textarea>
-            </label>
-          </div>
-          <div class="controls" style="margin-top:8px">
-            <button id="yahoo-parse-btn" type="button">Parse &amp; preview</button>
             <button id="yahoo-save-btn" type="button">Save Yahoo league</button>
           </div>
           <div id="yahoo-preview" style="margin-top:8px"></div>

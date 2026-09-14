@@ -356,6 +356,34 @@ check("parseYahooMatchupMeta: table-only paste yields nulls", () => {
   delete sandbox.__ym2;
 });
 
+check("fmtMinsSuffix: silent on finals/byes, shown otherwise", () => {
+  assert.strictEqual(app(`fmtMinsSuffix(0)`), "");
+  assert.strictEqual(app(`fmtMinsSuffix(null)`), "");
+  assert.ok(app(`fmtMinsSuffix(22.5)`).includes("min left"));
+});
+
+check("withClockDetail: never duplicates the clock", () => {
+  assert.strictEqual(app(`withClockDetail("12:55 - 4th", "12:55", "in")`), "12:55 - 4th");
+  assert.strictEqual(app(`withClockDetail("4th", "12:55", "in")`), "4th · 12:55");
+  assert.strictEqual(app(`withClockDetail("", "12:55", "in")`), "12:55");
+  assert.strictEqual(app(`withClockDetail("Final", "", "post")`), "Final");
+});
+
+check("matchup game lines: score/status split, no pre-game minutes", () => {
+  sandbox.__fin = { state: "post", away: "NYJ", home: "TEN", awayScore: 23, homeScore: 10 };
+  sandbox.__live = { state: "in", away: "DAL", home: "NYG", awayScore: 14, homeScore: 21, detail: "12:55 - 4th", clock: "12:55", period: 4 };
+  sandbox.__pre = { state: "pre", away: "DEN", home: "KC", awayScore: null, homeScore: null, label: "Mon 8:15 PM ET" };
+  assert.strictEqual(app(`gameScoreLine(__fin)`), "NYJ 23 @ TEN 10");
+  assert.strictEqual(app(`gameStatusLine(__fin)`), "");
+  assert.strictEqual(app(`gameScoreLine(__live)`), "DAL 14 @ NYG 21");
+  assert.strictEqual(app(`gameStatusLine(__live)`), "12:55 - 4th · 13 min left");
+  assert.strictEqual(app(`gameScoreLine(__pre)`), "DEN @ KC");
+  assert.strictEqual(app(`gameStatusLine(__pre)`), "Mon 8:15 PM ET");
+  assert.strictEqual(app(`gameScoreLine(null)`), "Bye");
+  assert.strictEqual(app(`gameStatusLine(null)`), "");
+  delete sandbox.__fin; delete sandbox.__live; delete sandbox.__pre;
+});
+
 check("yahoo week gate: matching week shows, stale hidden", () => {
   vm.runInContext(`yahooDataById.clear()`, sandbox);
   vm.runInContext(`gdWeek = 1`, sandbox);
