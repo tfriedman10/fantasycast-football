@@ -223,6 +223,31 @@ tr.locked .game-pill { opacity: 0.75; }
 }
 .pill.platform-sleeper { background: #123a2e; border-color: #1f6b52; color: #7df0c4; font-weight: 700; }
 .pill.platform-espn { background: #3a1c22; border-color: #8a3547; color: #ff9db0; font-weight: 700; }
+.pill.platform-yahoo { background: #2c2145; border-color: #6d4fc2; color: #cdb9ff; font-weight: 700; }
+#yahoo-paste-input {
+  width: 100%;
+  min-height: 90px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+.yahoo-preview-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+.yahoo-preview-table input {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  width: 100%;
+}
+.yahoo-preview-table input.yahoo-nfl { max-width: 56px; text-transform: uppercase; }
+.yahoo-preview-table input.yahoo-pts { max-width: 64px; }
 .espn-hint { color: var(--muted); font-size: 13px; margin: 0 0 12px 0; }
 .espn-hint code { background: var(--card-2); padding: 1px 6px; border-radius: 6px; }
 #espn-section .controls { margin-bottom: 10px; }

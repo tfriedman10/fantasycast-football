@@ -203,6 +203,126 @@ check("chopped/guillotine detection", () => {
   assert.strictEqual(app(`choppedKind("Shotgun League")`), "guillotine");
 });
 
+check("parseYahooPlayerBlock: fused name+team, DEF, junk", () => {
+  sandbox.__yp1 = "J. BurrowCin - QB";
+  sandbox.__yp2 = "BroncosDen - DEF";
+  sandbox.__yp3 = "S. DiggsWas - WR";
+  sandbox.__yp4 = "Final (W) 33-27 vs TB";
+  assert.deepStrictEqual(appJson(`parseYahooPlayerBlock(__yp1)`),
+    { playerName: "J. Burrow", nfl: "CIN", rawAbbr: "CIN", pos: "QB" });
+  assert.deepStrictEqual(appJson(`parseYahooPlayerBlock(__yp2)`),
+    { playerName: "DEN Defense", nfl: "DEN", rawAbbr: "DEN", pos: "DEF" });
+  assert.deepStrictEqual(appJson(`parseYahooPlayerBlock(__yp3)`),
+    { playerName: "S. Diggs", nfl: "WAS", rawAbbr: "WAS", pos: "WR" });
+  assert.strictEqual(vm.runInContext(`parseYahooPlayerBlock(__yp4)`, sandbox), null);
+  delete sandbox.__yp1; delete sandbox.__yp2; delete sandbox.__yp3; delete sandbox.__yp4;
+});
+
+check("parseYahooMatchupPaste: mirrored cols, dash nulls, DEF, BN skip", () => {
+  sandbox.__yp = [
+    "Tyler's Tip-Top Team",
+    "0 - 0 - 0",
+    "77.86",
+    "vs.",
+    "118.86",
+    "Don't call it a comeback",
+    "Stats\tPlayer\tProj\tFan Pts\tPos\tFan Pts\tProj\tPlayer\tStats",
+    "254 Pass Yds, 1 Pass TD, 1 Int, 20 Rush Yds",
+    "J. BurrowCin - QB",
+    "Final (W) 33-27 vs TB",
+    "20.30",
+    "14.16",
+    "QB",
+    "35.66",
+    "19.27",
+    "J. AllenBuf - QB",
+    "Final (W) 36-31 @ HOU",
+    "334 Pass Yds, 2 Pass TD, 23 Rush Yds, 2 Rush TD",
+    "15 Rush Yds, 2 Rec, 6 Rec Yds",
+    "R. DowdlePit - RB",
+    "Final (W) 20-13 vs ATL",
+    "11.04",
+    "3.10",
+    "RB",
+    "-",
+    "13.21",
+    "K. WalkerKC - RB",
+    "Mon 8:15 PM vs DEN",
+    "43 Rush Yds, 1 Rush TD, 1 Fum Lost",
+    "O. HamptonLAC - RB",
+    "Final (L) 14-26 vs ARI",
+    "14.30",
+    "8.30",
+    "W/R/T",
+    "27.40",
+    "12.07",
+    "D. MontgomeryHou - RB",
+    "Final (L) 31-36 vs BUF",
+    "60 Rush Yds, 2 Rush TD, 3 Rec, 19 Rec Yds, 1 Rec TD",
+    "1 Sack, 1 Blk Kick, PA 21-27",
+    "BroncosDen - DEF",
+    "Mon 8:15 PM @ KC",
+    "6.63",
+    "-",
+    "DEF",
+    "3.00",
+    "7.33",
+    "EaglesPhi - DEF",
+    "Final (W) 24-22 vs WAS",
+    "1 Sack, 1 Blk Kick, PA 21-27",
+    "54 Rush Yds",
+    "B. CorumLAR - RB",
+    "Final (L) 7-27 vs SF",
+    "8.35",
+    "5.40",
+    "BN",
+    "0.00",
+    "9.30",
+    "J. AddisonMin - WR",
+    "Final (W) 39-22 vs GB",
+    "15 Rush Yds, 1 Rec, 3 Rec Yds",
+  ].join("\n");
+  const res = appJson(`parseYahooMatchupPaste(__yp)`);
+  assert.strictEqual(res.left.length, 4, `left was ${JSON.stringify(res.left)}`);
+  assert.strictEqual(res.right.length, 4, `right was ${JSON.stringify(res.right)}`);
+  assert.deepStrictEqual(res.left[0], { slot: "QB", playerName: "J. Burrow", pos: "QB", nflTeam: "CIN", fantasyPts: 14.16 });
+  assert.deepStrictEqual(res.right[0], { slot: "QB", playerName: "J. Allen", pos: "QB", nflTeam: "BUF", fantasyPts: 35.66 });
+  // Pre-game dash → null actuals (proj dropped).
+  assert.strictEqual(res.right[1].playerName, "K. Walker");
+  assert.strictEqual(res.right[1].fantasyPts, null);
+  // DEF naming matches describePlayer convention; W/R/T slot kept.
+  assert.deepStrictEqual(res.left[3], { slot: "DEF", playerName: "DEN Defense", pos: "DEF", nflTeam: "DEN", fantasyPts: null });
+  assert.strictEqual(res.left[2].slot, "W/R/T");
+  // BN rows skipped entirely.
+  assert.ok(!res.left.some((r) => r.playerName === "B. Corum"), "bench leaked into left");
+  assert.ok(!res.right.some((r) => r.playerName === "J. Addison"), "bench leaked into right");
+  delete sandbox.__yp;
+});
+
+check("yahoo week gate: matching week shows, stale hidden", () => {
+  vm.runInContext(`yahooDataById.clear()`, sandbox);
+  vm.runInContext(`gdWeek = 1`, sandbox);
+  const mk = (id, week) => `yahooDataById.set(${JSON.stringify(id)}, { id: ${JSON.stringify(id)}, key: "yahoo:${id}", leagueName: "Y League", week: ${week}, mySide: "left", myTeamLabel: "Me", oppTeamLabel: "Opp", my: [{ slot: "QB", playerName: "J. Burrow", pos: "QB", nflTeam: "CIN", fantasyPts: 14.16 }], opp: [] })`;
+  vm.runInContext(mk("a-w1", 1), sandbox);
+  vm.runInContext(mk("a-w2", 2), sandbox);
+  const inc = appJson(`collectYahooEntries()`);
+  assert.strictEqual(inc.length, 1, `expected 1 included entry, got ${inc.length}`);
+  assert.strictEqual(inc[0].platform, "yahoo");
+  const gate = appJson(`yahooIncludedEntries()`);
+  assert.strictEqual(gate.included.length, 1);
+  assert.strictEqual(gate.skipped.length, 1);
+  // Matchup builder maps the stored side without live data.
+  const mu = appJson(`buildYahooMatchup("yahoo:a-w1", null)`);
+  assert.strictEqual(mu.platform, "yahoo");
+  assert.strictEqual(mu.my.length, 1);
+  assert.strictEqual(mu.my[0].playerName, "J. Burrow");
+  // No auto week (Yahoo-only) → everything shows.
+  vm.runInContext(`gdWeek = null`, sandbox);
+  assert.strictEqual(appJson(`yahooIncludedEntries()`).included.length, 2);
+  vm.runInContext(`yahooDataById.clear()`, sandbox);
+  vm.runInContext(`gdWeek = null`, sandbox);
+});
+
 // ================= 2. UX evals (offline fixtures, rendered HTML) =================
 
 function fixtureSchedule(state, special) {
