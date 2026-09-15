@@ -142,6 +142,16 @@ function normTeam(abbr) {
 
 let scheduleCache = { key: null, data: null };
 
+// ESPN's shortDetail often already embeds the clock ("12:55 - 4th") —
+// don't append displayClock a second time ("12:55 - 4th · 12:55").
+function withClockDetail(detail, clock, state) {
+  if (state === "in" && clock) {
+    if (detail && !detail.includes(clock)) return `${detail} · ${clock}`;
+    if (!detail) return clock;
+  }
+  return detail;
+}
+
 async function getSchedule(season, week, seasonType) {
   const espnType = seasonType === "post" ? 3 : seasonType === "pre" ? 1 : 2;
   const key = `${season}-${espnType}-${week}`;
@@ -175,8 +185,7 @@ async function getSchedule(season, week, seasonType) {
     const st = (ev.status && ev.status.type) || (comp.status && comp.status.type) || {};
     const fullStatus = ev.status || comp.status || {};
     const state = st.state || "pre"; // "pre" | "in" | "post"
-    let detail = st.shortDetail || st.description || "";
-    if (fullStatus.displayClock && state === "in") detail = `${detail} · ${fullStatus.displayClock}`.trim();
+    let detail = withClockDetail(st.shortDetail || st.description || "", fullStatus.displayClock || "", state);
     if (!detail) detail = state === "post" ? "Final" : state === "in" ? "Live" : label;
     const home = teams.find((t) => t.homeAway === "home") || teams[1];
     const away = teams.find((t) => t.homeAway === "away") || teams[0];
@@ -316,7 +325,7 @@ function syncLeagues() {
       renderGameday();
     });
     const span = document.createElement("span");
-    span.textContent = `${it.name} (${it.platform === "espn" ? "ESPN" : "Sleeper"})`;
+    span.textContent = `${it.name} (${it.platform === "espn" ? "ESPN" : it.platform === "yahoo" ? "Yahoo" : "Sleeper"})`;
     label.appendChild(cb);
     label.appendChild(span);
     box.appendChild(label);
@@ -555,11 +564,16 @@ async function load() {
     const schedType = (nflState && nflState.season_type) || "regular";
     // Q1: ESPN week defaults to the Sleeper week — prefill the input when the
     // user hasn't typed one so Add ESPN league picks it up automatically.
+    // Same for the Yahoo manual week (used for week-gating pastes).
     try {
       const espnWeekEl = document.getElementById("espn-week-input");
       if (espnWeekEl && !espnWeekEl.value) {
         espnWeekEl.value = schedWeek;
         espnWeekEl.placeholder = `auto (${schedWeek})`;
+      }
+      const yahooWeekEl = document.getElementById("yahoo-week-input");
+      if (yahooWeekEl && !yahooWeekEl.value) {
+        yahooWeekEl.placeholder = `auto (${schedWeek})`;
       }
     } catch (e) {}
     const [players, schedule] = await Promise.all([
@@ -1019,6 +1033,589 @@ async function autoLoadPersistedEspnLeagues() {
   } catch (e) {}
 }
 
+// ---------------- Yahoo manual leagues (paste-only, GameDay only) ----------------
+// No OAuth / API: user pastes the Yahoo web matchup table; we parse starters
+// (Fan Pts actuals only, projections dropped) and feed GameDay collectors.
+// Entries are static snapshots gated on week: a saved Yahoo week only shows
+// when it matches the current auto week (Sleeper gdWeek, else ESPN week).
+// With no auto week (Yahoo-only), all saved Yahoo leagues show.
+
+// -- Pure parser (no DOM; unit-tested in tests/pure.js) --
+
+function parseYahooNumber(tok) {
+  if (tok == null) return null;
+  const t = String(tok).trim();
+  if (t === "" || t === "-" || t === "—" || t === "–") return null;
+  const n = parseFloat(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Player block looks like "J. BurrowCin - QB" (no space before team),
+// "J. Cook IIIBuf - RB", "BroncosDen - DEF", "K. MurrayMin - QB Q".
+function parseYahooPlayerBlock(line) {
+  if (!line) return null;
+  const m = String(line).trim().match(/^(.+?)([A-Z][A-Za-z]{1,2})\s*-\s*(QB|RB|WR|TE|K|DEF)\b\s*(Q|PUP-R|PUP|IR|O|D|SUSP|OUT)?$/);
+  if (!m) return null;
+  const name = m[1].trim();
+  if (!name) return null;
+  const abbr = m[2].toUpperCase();
+  const pos = m[3].toUpperCase();
+  return {
+    playerName: pos === "DEF" ? `${abbr} Defense` : name,
+    nfl: normTeam(abbr),
+    rawAbbr: abbr,
+    pos,
+  };
+}
+
+function normYahooSlot(t) {
+  const u = String(t || "").trim().toUpperCase();
+  if (u === "WRT") return "W/R/T";
+  return u;
+}
+
+function isYahooSlotToken(t) {
+  return ["QB", "RB", "WR", "TE", "W/R/T", "WRT", "K", "DEF", "BN", "IR"].includes(
+    String(t || "").trim().toUpperCase()
+  );
+}
+
+function isYahooStarterSlot(t) {
+  return ["QB", "RB", "WR", "TE", "W/R/T", "K", "DEF"].includes(normYahooSlot(t));
+}
+
+const YAHOO_JUNK_RES = [
+  /image-/i, /\.png/i, /players remaining/i, /underdog/i, /favorite/i,
+  /orig proj/i, /proj pts/i, /^total$/i, /^note:/i, /stat corrections/i,
+  /^stats\s+player/i,
+];
+
+// Parse the Yahoo web matchup paste. Columns are mirrored around the center
+// Pos slot: left [Proj, Fan], right [Fan, Proj]. Returns starters only
+// (BN/IR skipped); projections are dropped — Fan Pts only per spec.
+function parseYahooMatchupPaste(text) {
+  const warnings = [];
+  const left = [];
+  const right = [];
+  const rawLines = String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  const lines = rawLines.filter((s) => !YAHOO_JUNK_RES.some((re) => re.test(s)));
+  const isNumTok = (s) => /^-?\d+\.\d{1,2}$/.test(s) || /^[-—–]$/.test(s);
+  for (let i = 0; i < lines.length; i++) {
+    if (!isYahooSlotToken(lines[i])) continue;
+    const slot = normYahooSlot(lines[i]);
+    const starter = isYahooStarterSlot(lines[i]);
+    const leftNums = [];
+    for (let k = i - 1; k >= 0 && leftNums.length < 2 && i - k <= 8; k--) {
+      if (isYahooSlotToken(lines[k])) break;
+      if (isNumTok(lines[k])) leftNums.unshift(lines[k]);
+    }
+    const rightNums = [];
+    for (let k = i + 1; k < lines.length && rightNums.length < 2 && k - i <= 8; k++) {
+      if (isYahooSlotToken(lines[k])) break;
+      if (isNumTok(lines[k])) rightNums.push(lines[k]);
+    }
+    let leftPlayer = null;
+    for (let k = i - 1; k >= 0 && i - k <= 8; k--) {
+      if (isYahooSlotToken(lines[k])) break;
+      const p = parseYahooPlayerBlock(lines[k]);
+      if (p) { leftPlayer = p; break; }
+    }
+    let rightPlayer = null;
+    for (let k = i + 1; k < lines.length && k - i <= 8; k++) {
+      if (isYahooSlotToken(lines[k])) break;
+      const p = parseYahooPlayerBlock(lines[k]);
+      if (p) { rightPlayer = p; break; }
+    }
+    if (!starter) continue; // BN/IR bench rows: not used by GameDay
+    if (!leftPlayer && !rightPlayer) {
+      warnings.push(`A "${slot}" row had no parseable players and was skipped.`);
+      continue;
+    }
+    // Left order is [Proj, Fan]; right order is [Fan, Proj]. Keep Fan only.
+    const leftFan = leftNums.length >= 2
+      ? parseYahooNumber(leftNums[1])
+      : leftNums.length === 1 ? parseYahooNumber(leftNums[0]) : null;
+    const rightFan = rightNums.length >= 1 ? parseYahooNumber(rightNums[0]) : null;
+    if (leftPlayer) {
+      left.push({
+        slot,
+        playerName: leftPlayer.playerName,
+        pos: leftPlayer.pos,
+        nflTeam: leftPlayer.nfl,
+        fantasyPts: leftFan,
+      });
+    }
+    if (rightPlayer) {
+      right.push({
+        slot,
+        playerName: rightPlayer.playerName,
+        pos: rightPlayer.pos,
+        nflTeam: rightPlayer.nfl,
+        fantasyPts: rightFan,
+      });
+    }
+  }
+  if (left.length === 0 && right.length === 0) {
+    warnings.push("No starters parsed. Paste the Yahoo web matchup table (with the Pos column).");
+  }
+  if (left.length > 14 || right.length > 14) {
+    warnings.push("Unusually many starters — bench rows may have leaked in.");
+  }
+  if (left.length > 0 && right.length > 0 && Math.abs(left.length - right.length) > 2) {
+    warnings.push("Sides have different starter counts; check the paste.");
+  }
+  return { left, right, warnings };
+}
+
+// Header metadata from a full-page Yahoo paste. The league line looks like
+// "One league to rule them all (ID# 482639)", each side's team name sits two
+// lines above its "W-L-T" record line, week from "Week 1: ...". All fields
+// are nullable — a table-only paste yields all nulls and the form values
+// (or generic fallbacks) are used instead.
+function parseYahooMatchupMeta(text) {
+  const out = { leagueName: null, leftTeam: null, rightTeam: null, week: null };
+  const head = String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  // Only the pre-table header carries our matchup's names; the page footer
+  // repeats other matchups, so stop at the first table header row.
+  let end = head.findIndex((s) => /^stats\s+player/i.test(s));
+  if (end === -1) end = head.length;
+  const region = head.slice(0, end);
+  for (const s of region) {
+    const lm = s.match(/^(.*?)\s*\(ID#\s*\d+\)\s*$/);
+    if (lm && lm[1].trim()) { out.leagueName = lm[1].trim(); break; }
+  }
+  for (const s of region) {
+    const wm = s.match(/\bWeek\s+(\d{1,2})\b/);
+    if (wm) {
+      const w = parseInt(wm[1], 10);
+      if (w >= 1) out.week = w;
+      break;
+    }
+  }
+  const isRecord = (s) => /^\d+\s*-\s*\d+\s*-\s*\d+$/.test(s);
+  const isNameLike = (s) =>
+    s.length >= 1 && s.length <= 60 &&
+    !/^vs\.?$/i.test(s) && !/^total$/i.test(s) &&
+    !/orig proj|proj pts|players remaining|underdog|favorite|matchups/i.test(s) &&
+    !/^-?\d+\.\d{1,2}$/.test(s) && !/^[-—–]$/.test(s) &&
+    !isYahooSlotToken(s) && !parseYahooPlayerBlock(s);
+  const teams = [];
+  for (let i = 0; i < region.length; i++) {
+    if (!isRecord(region[i]) || i < 2) continue;
+    const name = region[i - 2];
+    if (isNameLike(name)) teams.push(name);
+    if (teams.length === 2) break;
+  }
+  if (teams[0]) out.leftTeam = teams[0];
+  if (teams[1]) out.rightTeam = teams[1];
+  return out;
+}
+
+// -- Store ( mirrors espnDataById pattern, app.js:760 ) --
+
+const yahooDataById = new Map(); // id -> { id, key, leagueName, week, mySide, myTeamLabel, oppTeamLabel, my, opp }
+let lastYahooParse = null; // { left, right, warnings } from the preview step
+let lastYahooMeta = null; // { leagueName, leftTeam, rightTeam, week } detected from the paste header
+
+function yahooSlug(s) {
+  const slug = String(s || "league").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "league";
+}
+
+function getYahooList() {
+  return [...yahooDataById.values()];
+}
+
+function persistYahooLeagues() {
+  try {
+    localStorage.setItem("yahoo_leagues", JSON.stringify(getYahooList()));
+  } catch (e) { /* persistence optional */ }
+}
+
+// Week gate (open Q2): a saved Yahoo week shows only when it matches the
+// current auto week. With no auto week (Yahoo-only view), everything shows.
+function yahooAutoWeek() {
+  if (gdWeek && gdWeek >= 1) return gdWeek;
+  const ew = (typeof firstEspnWeek === "function" && firstEspnWeek()) || null;
+  if (ew && ew >= 1) return ew;
+  return null;
+}
+
+function yahooIncludedEntries() {
+  const auto = yahooAutoWeek();
+  const included = [];
+  const skipped = [];
+  for (const e of getYahooList()) {
+    if (getHiddenLeagues().has(e.key)) continue;
+    if (auto != null && Number(e.week) !== Number(auto)) skipped.push(e);
+    else included.push(e);
+  }
+  return { auto, included, skipped };
+}
+
+function yahooStatusNote() {
+  const { auto, skipped } = yahooIncludedEntries();
+  if (auto != null && skipped.length > 0) {
+    const names = skipped.map((e) => `"${e.leagueName}" (saved W${e.week})`).join(", ");
+    return ` Yahoo hidden for week mismatch (now W${auto}): ${names} — re-paste or change the week.`;
+  }
+  return "";
+}
+
+// -- GameDay collectors ( mirror collectEspnEntriesFor, app.js:1257 ) --
+
+function collectYahooEntries() {
+  const out = [];
+  for (const e of yahooIncludedEntries().included) {
+    const chopped = isChoppedLeague(e.leagueName);
+    for (const p of e.my || []) {
+      out.push({
+        leagueName: e.leagueName, platform: "yahoo", side: "mine",
+        teamLabel: e.myTeamLabel, slot: p.slot,
+        playerName: p.playerName, pos: p.pos, nflTeam: p.nflTeam,
+        fantasyPts: p.fantasyPts,
+      });
+    }
+    if (chopped) continue;
+    for (const p of e.opp || []) {
+      out.push({
+        leagueName: e.leagueName, platform: "yahoo", side: "opp",
+        teamLabel: e.oppTeamLabel, slot: p.slot,
+        playerName: p.playerName, pos: p.pos, nflTeam: p.nflTeam,
+        fantasyPts: p.fantasyPts,
+      });
+    }
+  }
+  return out;
+}
+
+function buildYahooMatchup(leagueKey, sched) {
+  const e = yahooDataById.get(String(leagueKey || "").replace(/^yahoo:/, ""));
+  if (!e) return null;
+  const toEntry = (p) => ({
+    slot: p.slot, playerName: p.playerName, pos: p.pos, nflTeam: p.nflTeam,
+    fantasyPts: p.fantasyPts,
+    game: matchupGameFor(p.nflTeam, sched),
+  });
+  const chopped = isChoppedLeague(e.leagueName);
+  const my = (e.my || []).map(toEntry);
+  const opp = chopped ? [] : (e.opp || []).map(toEntry);
+  let oppReason = "ok";
+  if (chopped) oppReason = "chopped";
+  else if (opp.length === 0) oppReason = "no-matchup";
+  return {
+    leagueName: e.leagueName, platform: "yahoo",
+    myLabel: e.myTeamLabel, oppLabel: chopped ? null : e.oppTeamLabel,
+    chopped, my, opp, oppReason,
+  };
+}
+
+// -- Info card (GameDay-only: no roster detail, just provenance) --
+
+function renderYahooInfoCard(entry) {
+  const card = document.createElement("div");
+  card.className = "league-card";
+  card.innerHTML = `
+    <div class="league-head">
+      <h2>${escHtml(entry.leagueName)} <span style="color:var(--muted);font-weight:400;font-size:13px">(Yahoo)</span></h2>
+      <div class="league-meta">
+        <span class="pill">${escHtml(entry.myTeamLabel)} vs ${escHtml(entry.oppTeamLabel)}</span>
+        <span class="pill">Week ${escHtml(entry.week)}</span>
+        <span class="pill">${(entry.my || []).length + (entry.opp || []).length} starters</span>
+      </div>
+    </div>
+    <div class="section">
+      <p class="player-sub" style="margin:0">Manual paste · GameDay only — re-paste to update. Hidden in the Lineups view by design; toggle visibility in Setup → Leagues.</p>
+    </div>
+  `;
+  return card;
+}
+
+function renderYahoo() {
+  for (const key of [...leagueStore.keys()]) {
+    if (key.startsWith("yahoo:")) leagueStore.delete(key);
+  }
+  for (const e of getYahooList()) {
+    const card = renderYahooInfoCard(e);
+    tagCard(card, "yahoo", "Yahoo");
+    leagueStore.set(e.key, { key: e.key, platform: "yahoo", name: e.leagueName, card });
+  }
+  syncLeagues();
+  renderGameday();
+}
+
+// -- Setup-panel UI --
+
+const yahooLeagueInput = document.getElementById("yahoo-league-input");
+const yahooWeekInput = document.getElementById("yahoo-week-input");
+const yahooSideInput = document.getElementById("yahoo-side-input");
+const yahooMyTeamInput = document.getElementById("yahoo-my-team-input");
+const yahooOppTeamInput = document.getElementById("yahoo-opp-team-input");
+const yahooPasteInput = document.getElementById("yahoo-paste-input");
+const yahooParseBtn = document.getElementById("yahoo-parse-btn");
+const yahooSaveBtn = document.getElementById("yahoo-save-btn");
+const yahooPreviewEl = document.getElementById("yahoo-preview");
+const yahooStatusEl = document.getElementById("yahoo-status");
+
+function yahooStatus(msg, isError = false) {
+  if (!yahooStatusEl) return;
+  yahooStatusEl.textContent = msg;
+  yahooStatusEl.classList.toggle("error", isError);
+}
+
+function yahooResolveWeek(meta) {
+  const typed = parseInt(yahooWeekInput && yahooWeekInput.value, 10);
+  if (typed && typed >= 1) return typed;
+  if (meta && meta.week && meta.week >= 1) return meta.week;
+  if (lastYahooMeta && lastYahooMeta.week && lastYahooMeta.week >= 1) return lastYahooMeta.week;
+  const auto = yahooAutoWeek();
+  if (auto && auto >= 1) return auto;
+  return 1;
+}
+
+function renderYahooPreview() {
+  if (!yahooPreviewEl) return;
+  const p = lastYahooParse;
+  if (!p || (p.left.length === 0 && p.right.length === 0)) {
+    yahooPreviewEl.innerHTML = "";
+    return;
+  }
+  const rowHtml = (side, r, idx) => `
+    <tr data-side="${side}" data-idx="${idx}">
+      <td class="yahoo-slot">${escHtml(r.slot)}</td>
+      <td><input class="yahoo-name" value="${escHtml(r.playerName)}" spellcheck="false" /><div class="player-sub">${escHtml(r.pos)}</div></td>
+      <td><input class="yahoo-nfl" value="${escHtml(r.nflTeam || "")}" maxlength="3" spellcheck="false" /></td>
+      <td><input class="yahoo-pts" value="${r.fantasyPts != null ? r.fantasyPts : ""}" placeholder="—" inputmode="decimal" /></td>
+    </tr>`;
+  const groupHtml = (side, rows, label) => rows.length === 0 ? "" :
+    `<tr class="yahoo-group"><td colspan="4">${escHtml(label)} (${rows.length})</td></tr>` + rows;
+  const rows = groupHtml("left", p.left.map((r, i) => rowHtml("left", r, i)), "Left")
+    + groupHtml("right", p.right.map((r, i) => rowHtml("right", r, i)), "Right");
+  const warns = (p.warnings || []).map((w) => `<div class="player-sub">⚠ ${escHtml(w)}</div>`).join("");
+  yahooPreviewEl.innerHTML = `
+    <div class="player-sub">Preview (editable — fix names/teams/points before saving; projections dropped):</div>
+    ${warns}
+    <div class="yahoo-preview-scroll">
+    <table class="yahoo-preview-table">
+      <thead><tr><th class="yahoo-slot">Slot</th><th>Player</th><th class="yahoo-nflcol">NFL</th><th class="yahoo-fancol">Fan</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>`;
+}
+
+function readYahooPreview() {
+  // Save reads the edited preview table so user fixes land in GameDay.
+  if (!yahooPreviewEl || !lastYahooParse) return null;
+  const trs = yahooPreviewEl.querySelectorAll
+    ? yahooPreviewEl.querySelectorAll("tr[data-side]")
+    : [];
+  if (!trs || trs.length === 0) return lastYahooParse;
+  const getVal = (tr, cls) => {
+    const inp = tr.querySelector ? tr.querySelector(`input.${cls}`) : null;
+    return inp ? inp.value : "";
+  };
+  const parsePts = (v) => {
+    const t = String(v == null ? "" : v).trim();
+    if (t === "" || t === "-" || t === "—") return null;
+    const n = parseFloat(t);
+    return Number.isFinite(n) ? n : null;
+  };
+  const left = [];
+  const right = [];
+  const src = lastYahooParse;
+  for (const tr of trs) {
+    const side = tr.getAttribute ? tr.getAttribute("data-side") : null;
+    const idx = parseInt(tr.getAttribute ? tr.getAttribute("data-idx") : "", 10);
+    const base = (side === "left" ? src.left : src.right) || [];
+    const b = base[idx];
+    if (!b) continue;
+    const name = String(getVal(tr, "yahoo-name") || "").trim() || b.playerName;
+    const nflRaw = String(getVal(tr, "yahoo-nfl") || "").trim().toUpperCase() || b.nflTeam || "";
+    const entry = {
+      slot: b.slot,
+      playerName: name,
+      pos: b.pos,
+      nflTeam: normTeam(nflRaw) || (nflRaw === "" ? null : b.nflTeam),
+      fantasyPts: parsePts(getVal(tr, "yahoo-pts")),
+    };
+    (side === "left" ? left : right).push(entry);
+  }
+  return { left, right, warnings: src.warnings || [] };
+}
+
+function syncYahooLoadedList() {
+  const box = document.getElementById("yahoo-loaded-list");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const d of getYahooList()) {
+    const label = document.createElement("label");
+    label.className = "toggle-row";
+    const span = document.createElement("span");
+    span.textContent = `${d.leagueName} (W${d.week} · ${d.myTeamLabel} vs ${d.oppTeamLabel})`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Remove";
+    btn.style.marginLeft = "8px";
+    btn.addEventListener("click", () => removeYahooLeague(d.id));
+    label.appendChild(span);
+    label.appendChild(btn);
+    box.appendChild(label);
+  }
+}
+
+function removeYahooLeague(id) {
+  const d = yahooDataById.get(String(id));
+  yahooDataById.delete(String(id));
+  leagueStore.delete(`yahoo:${String(id)}`);
+  persistYahooLeagues();
+  syncYahooLoadedList();
+  renderYahoo();
+  yahooStatus(getYahooList().length
+    ? `Removed ${d ? d.leagueName : id}. ${getYahooList().length} Yahoo league(s) still saved.`
+    : "No Yahoo leagues saved. Paste one above.");
+}
+
+function saveYahooLeague() {
+  const paste = (yahooPasteInput && yahooPasteInput.value) || "";
+  if (!paste.trim() && !lastYahooParse) {
+    yahooStatus("Paste your Yahoo matchup table first, then Parse & preview.", true);
+    return;
+  }
+  if (!lastYahooParse) {
+    try {
+      lastYahooParse = parseYahooMatchupPaste(paste);
+    } catch (e) {
+      yahooStatus(`Parse failed: ${e.message}`, true);
+      return;
+    }
+  }
+  // Header meta: cached from the Parse step, else detected fresh now.
+  // League / team names are optional — detected values, then fallbacks.
+  let meta = lastYahooMeta;
+  if ((!meta || (!meta.leagueName && !meta.leftTeam && !meta.week)) && paste.trim()) {
+    try {
+      meta = parseYahooMatchupMeta(paste);
+      lastYahooMeta = meta;
+    } catch (e) { meta = lastYahooMeta; }
+  }
+  const leagueName = (yahooLeagueInput && yahooLeagueInput.value.trim())
+    || (meta && meta.leagueName)
+    || "Yahoo league";
+  const edited = readYahooPreview() || lastYahooParse;
+  if (edited.left.length === 0 && edited.right.length === 0) {
+    yahooStatus(`No starters parsed. ${(edited.warnings || []).join(" ")}`, true);
+    renderYahooPreview();
+    return;
+  }
+  const week = yahooResolveWeek(meta);
+  const mySide = (yahooSideInput && yahooSideInput.value === "right") ? "right" : "left";
+  const metaMy = meta ? (mySide === "left" ? meta.leftTeam : meta.rightTeam) : null;
+  const metaOpp = meta ? (mySide === "left" ? meta.rightTeam : meta.leftTeam) : null;
+  const myTeamLabel = (yahooMyTeamInput && yahooMyTeamInput.value.trim())
+    || metaMy
+    || (mySide === "left" ? "Left team" : "Right team");
+  const oppTeamLabel = (yahooOppTeamInput && yahooOppTeamInput.value.trim())
+    || metaOpp
+    || (mySide === "left" ? "Right team" : "Left team");
+  const my = (mySide === "left" ? edited.left : edited.right).map((r) => ({ ...r }));
+  const opp = (mySide === "left" ? edited.right : edited.left).map((r) => ({ ...r }));
+  const id = `${yahooSlug(leagueName)}-w${week}`;
+  const entry = {
+    id, key: `yahoo:${id}`,
+    leagueName, week, mySide, myTeamLabel, oppTeamLabel, my, opp,
+  };
+  yahooDataById.set(id, entry);
+  persistYahooLeagues();
+  syncYahooLoadedList();
+  renderYahoo();
+  const { auto } = yahooIncludedEntries();
+  const gated = auto != null && Number(week) !== Number(auto);
+  yahooStatus(gated
+    ? `Saved "${leagueName}" for W${week}, but the current week is W${auto} — hidden until weeks match.${yahooStatusNote()}`
+    : `Saved "${leagueName}" (W${week}): ${my.length}+${opp.length} starters → GameDay.${yahooStatusNote()}`);
+}
+
+function loadYahooPersisted() {
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem("yahoo_leagues") || "[]"); } catch (e) { list = []; }
+  if (!Array.isArray(list) || list.length === 0) return;
+  for (const e of list.slice(0, 10)) {
+    if (!e || !e.leagueName || !Array.isArray(e.my)) continue;
+    const week = parseInt(e.week, 10) || 1;
+    const id = e.id || `${yahooSlug(e.leagueName)}-w${week}`;
+    yahooDataById.set(String(id), {
+      id: String(id), key: `yahoo:${id}`,
+      leagueName: String(e.leagueName), week,
+      mySide: e.mySide === "right" ? "right" : "left",
+      myTeamLabel: String(e.myTeamLabel || "My team"),
+      oppTeamLabel: String(e.oppTeamLabel || "Opponent"),
+      my: e.my, opp: Array.isArray(e.opp) ? e.opp : [],
+    });
+  }
+  // Leave the league-name input on the most recent entry for re-pasting.
+  try {
+    const last = getYahooList()[getYahooList().length - 1];
+    if (last && yahooLeagueInput && !yahooLeagueInput.value) yahooLeagueInput.value = last.leagueName;
+    if (last && yahooWeekInput && !yahooWeekInput.value) yahooWeekInput.value = last.week;
+  } catch (e) {}
+  syncYahooLoadedList();
+  renderYahoo();
+}
+
+if (yahooParseBtn) {
+  yahooParseBtn.addEventListener("click", () => {
+    const paste = (yahooPasteInput && yahooPasteInput.value) || "";
+    if (!paste.trim()) {
+      yahooStatus("Paste your Yahoo matchup table first.", true);
+      return;
+    }
+    try {
+      lastYahooParse = parseYahooMatchupPaste(paste);
+      lastYahooMeta = parseYahooMatchupMeta(paste);
+    } catch (e) {
+      yahooStatus(`Parse failed: ${e.message}`, true);
+      return;
+    }
+    // Autofill blank fields from the detected header (typed values win).
+    try {
+      const sideNow = (yahooSideInput && yahooSideInput.value === "right") ? "right" : "left";
+      if (lastYahooMeta) {
+        if (yahooLeagueInput && !yahooLeagueInput.value.trim() && lastYahooMeta.leagueName) {
+          yahooLeagueInput.value = lastYahooMeta.leagueName;
+        }
+        if (yahooWeekInput && !yahooWeekInput.value && lastYahooMeta.week) {
+          yahooWeekInput.value = lastYahooMeta.week;
+        }
+        const myName = sideNow === "left" ? lastYahooMeta.leftTeam : lastYahooMeta.rightTeam;
+        const oppName = sideNow === "left" ? lastYahooMeta.rightTeam : lastYahooMeta.leftTeam;
+        if (yahooMyTeamInput && !yahooMyTeamInput.value.trim() && myName) yahooMyTeamInput.value = myName;
+        if (yahooOppTeamInput && !yahooOppTeamInput.value.trim() && oppName) yahooOppTeamInput.value = oppName;
+      }
+    } catch (e) {}
+    renderYahooPreview();
+    const n = lastYahooParse.left.length + lastYahooParse.right.length;
+    const warns = (lastYahooParse.warnings || []).join(" ");
+    const detected = lastYahooMeta && (lastYahooMeta.leagueName || lastYahooMeta.leftTeam)
+      ? ` Detected: ${lastYahooMeta.leagueName || "league"}${lastYahooMeta.leftTeam ? ` (${lastYahooMeta.leftTeam} vs ${lastYahooMeta.rightTeam || "?"})` : ""}${lastYahooMeta.week ? ` W${lastYahooMeta.week}` : ""}.`
+      : "";
+    yahooStatus(n > 0
+      ? `Parsed ${lastYahooParse.left.length}+${lastYahooParse.right.length} starters.${detected} Check the preview, fix anything, then Save. ${warns}`
+      : `No starters parsed. ${warns}`, n === 0);
+  });
+}
+
+if (yahooSaveBtn) {
+  yahooSaveBtn.addEventListener("click", saveYahooLeague);
+}
+
 // Collapsible setup panel (state persists across visits).
 const panelEl = document.getElementById("control-panel");
 const panelToggleBtn = document.getElementById("panel-toggle");
@@ -1368,7 +1965,7 @@ function syncGamedayLeaguePicker() {
   for (const o of opts) {
     const el = document.createElement("option");
     el.value = o.key;
-    el.textContent = `${o.name} (${o.platform === "espn" ? "ESPN" : "Sleeper"})`;
+    el.textContent = `${o.name} (${o.platform === "espn" ? "ESPN" : o.platform === "yahoo" ? "Yahoo" : "Sleeper"})`;
     leagueInput.appendChild(el);
   }
   if (prev && opts.some((o) => o.key === prev)) {
@@ -1406,19 +2003,32 @@ function minutesRemainingForGame(game) {
   return clockMins != null ? Math.max(0, clockMins) : 0;
 }
 
+// Matchup rows show the game on two lines: score first, then clock/status.
+// Finals need no minutes (obvious) and pre-game needs none either —
+// minutes only ever appear on the live status line.
+function gameScoreLine(game) {
+  if (!game) return "Bye";
+  if (game.state !== "pre" && game.awayScore != null && game.homeScore != null) {
+    return `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore}`;
+  }
+  return `${game.away} @ ${game.home}`;
+}
+
+function gameStatusLine(game) {
+  if (!game || game.state === "post") return "";
+  if (game.state === "in") {
+    const mins = fmtMinsSuffix(minutesRemainingForGame(game)).replace(/^ · /, "");
+    return game.detail ? (mins ? `${game.detail} · ${mins}` : game.detail) : mins;
+  }
+  return game.label || "";
+}
+
 // Plain game score/state line for matchup rows (no special-window highlight).
 function gameLineFor(game) {
   if (!game) return "Bye";
-  if (game.state === "pre") return `${game.away} @ ${game.home} · ${game.label}`;
-  if (game.state === "post") {
-    if (game.awayScore != null && game.homeScore != null) return `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} · Final`;
-    return `${game.away} @ ${game.home} · Final`;
-  }
-  // Live
-  const score = game.awayScore != null && game.homeScore != null
-    ? `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore}`
-    : `${game.away} @ ${game.home}`;
-  return game.detail ? `${score} · ${game.detail}` : score;
+  if (game.state === "post") return `${gameScoreLine(game)} · Final`;
+  const st = gameStatusLine(game);
+  return st ? `${gameScoreLine(game)} · ${st}` : gameScoreLine(game);
 }
 
 function matchupGameFor(nflTeam, sched) {
@@ -1547,6 +2157,7 @@ function buildMatchupData(leagueKey, sched) {
   if (!leagueKey) return null;
   if (leagueKey.startsWith("sleeper:")) return buildSleeperMatchup(leagueKey, sched);
   if (leagueKey.startsWith("espn:")) return buildEspnMatchup(leagueKey, sched);
+  if (leagueKey.startsWith("yahoo:")) return buildYahooMatchup(leagueKey, sched);
   return null;
 }
 
@@ -1558,6 +2169,12 @@ function gameKeyForEntry(entry) {
 function fmtMins(n) {
   const r = Math.round(Number(n) || 0);
   return `${r} min left`;
+}
+
+// Finals (and byes) have no minutes left to show — suffix is for live/pre only.
+function fmtMinsSuffix(n) {
+  const r = Math.round(Number(n) || 0);
+  return r > 0 ? ` · ${r} min left` : "";
 }
 
 let lastOppWarnKey = "";
@@ -1600,7 +2217,7 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
     }
   };
   const oppNote = hasOpp ? `${m.oppLabel} ${fmtPts(oppPts)}` : oppUnavailableText();
-  status.textContent = `Week ${weekLabel} · ${m.leagueName} (${m.platform === "espn" ? "ESPN" : "Sleeper"}) · ${m.myLabel} ${fmtPts(myPts)} vs ${oppNote}.`;
+  status.textContent = `Week ${weekLabel} · ${m.leagueName} (${m.platform === "espn" ? "ESPN" : m.platform === "yahoo" ? "Yahoo (manual)" : "Sleeper"}) · ${m.myLabel} ${fmtPts(myPts)} vs ${oppNote}.${m.platform === "yahoo" ? " Manual paste — re-paste to update." : ""}${yahooStatusNote()}`;
   if (!hasOpp && !m.chopped) {
     // Dedupe: renders happen often (toggles, refreshes); log once per cause.
     const warnKey = `${gdMatchupLeagueKey}|${weekLabel}|${m.oppReason}`;
@@ -1617,12 +2234,16 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
     }
   }
 
-  const rowHtml = (e) => {
-    const mins = minutesRemainingForGame(e.game);
+  const rowHtml = (e, side) => {
+    const statusLine = gameStatusLine(e.game);
+    const scoreLine = e.game && e.game.state === "post"
+      ? `${gameScoreLine(e.game)} · Final`
+      : gameScoreLine(e.game);
     return `<div class="mu-player">
-      <div class="mu-line1"><span class="slot-inline">${escHtml(e.slot)}</span><span class="player-name">${escHtml(e.playerName)}</span><span class="fpts-cell">${matchupDisplayPts(e)}</span></div>
+      <div class="mu-line1"><span class="side ${side} mu-side-chip">${side === "mine" ? "ME" : "OPP"}</span><span class="slot-inline">${escHtml(e.slot)}</span><span class="player-name">${escHtml(e.playerName)}</span><span class="fpts-cell">${matchupDisplayPts(e)}</span></div>
       <div class="player-sub">${escHtml(e.pos)} · ${escHtml(e.nflTeam || "—")}</div>
-      <div class="player-sub mu-game">${escHtml(gameLineFor(e.game))} · ${fmtMins(mins)}</div>
+      <div class="player-sub mu-game">${escHtml(scoreLine)}</div>
+      ${statusLine ? `<div class="player-sub mu-game">${escHtml(statusLine)}</div>` : ""}
     </div>`;
   };
 
@@ -1631,7 +2252,7 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
   for (let i = 0; i < n; i++) {
     const me = m.my[i];
     const op = hasOpp ? m.opp[i] : undefined;
-    rows += `<tr class="mu-row"><td class="mu-cell mine">${me ? rowHtml(me) : `<span class="empty">—</span>`}</td><td class="mu-cell opp">${op ? rowHtml(op) : `<span class="empty">—</span>`}</td></tr>`;
+    rows += `<tr class="mu-row"><td class="mu-cell mine">${me ? rowHtml(me, "mine") : `<span class="empty">—</span>`}</td><td class="mu-cell opp">${op ? rowHtml(op, "opp") : `<span class="empty">—</span>`}</td></tr>`;
   }
 
   wrap.innerHTML = "";
@@ -1639,9 +2260,9 @@ function renderGamedayMatchup(wrap, status, sched, weekLabel) {
   card.className = "gd-game mu-card";
   card.innerHTML = `
     <div class="mu-header">
-      <div class="mu-team mine"><div class="mu-team-name">${escHtml(m.myLabel)}</div><div class="mu-team-score">${fmtPts(myPts)} <span class="player-sub">· ${fmtMins(myMins)}</span></div></div>
+      <div class="mu-team mine"><div class="mu-team-name">${escHtml(m.myLabel)}</div><div class="mu-team-score">${fmtPts(myPts)}${fmtMinsSuffix(myMins) ? `<span class="player-sub">${escHtml(fmtMinsSuffix(myMins))}</span>` : ""}</div></div>
       <div class="mu-vs">vs</div>
-      <div class="mu-team opp">${hasOpp ? `<div class="mu-team-name">${escHtml(m.oppLabel)}</div><div class="mu-team-score">${fmtPts(oppPts)} <span class="player-sub">· ${fmtMins(oppMins)}</span></div>` : `<div class="mu-team-name empty">${m.chopped ? `No opponent (${choppedKind(m.leagueName)})` : escHtml(oppUnavailableText())}</div>`}</div>
+      <div class="mu-team opp">${hasOpp ? `<div class="mu-team-name">${escHtml(m.oppLabel)}</div><div class="mu-team-score">${fmtPts(oppPts)}${fmtMinsSuffix(oppMins) ? `<span class="player-sub">${escHtml(fmtMinsSuffix(oppMins))}</span>` : ""}</div>` : `<div class="mu-team-name empty">${m.chopped ? `No opponent (${choppedKind(m.leagueName)})` : escHtml(oppUnavailableText())}</div>`}</div>
     </div>
     <div class="gd-body">
       <table class="mu-table">
@@ -1681,11 +2302,11 @@ function renderGameday() {
     renderGamedayMatchup(wrap, status, gdSchedule, weekLabel);
     return;
   }
-  const entries = [...collectSleeperEntries(), ...collectEspnEntries()];
+  const entries = [...collectSleeperEntries(), ...collectEspnEntries(), ...collectYahooEntries()];
   if (entries.length === 0) {
-    status.textContent = gdSleeperData.length === 0 && espnDataById.size === 0
+    status.textContent = gdSleeperData.length === 0 && espnDataById.size === 0 && yahooDataById.size === 0
       ? "Load your leagues first, then open this tab."
-      : "No starters found for GameDay (matchups haven't loaded yet, or all visible leagues are on bye).";
+      : "No starters found for GameDay (matchups haven't loaded yet, all visible leagues are on bye, or saved Yahoo weeks don't match the current week).";
     wrap.innerHTML = "";
     return;
   }
@@ -1712,7 +2333,7 @@ function renderGameday() {
     const db = b[1].game ? b[1].game.date.getTime() : Infinity;
     return da - db;
   });
-  status.textContent = `Week ${weekLabel} · ${entries.length} starters (you + opponents) across ${sorted.length} NFL games. Scores refresh with “Refresh scores”. Half-PPR comparable; per-league live scoring shown.`;
+  status.textContent = `Week ${weekLabel} · ${entries.length} starters (you + opponents) across ${sorted.length} NFL games. Scores refresh with “Refresh scores”. Half-PPR comparable; per-league live scoring shown.${yahooStatusNote()}`;
 
   const gameTitle = (g) => {
     // ESPN returns 0-0 for pre-game scores — suppress until kickoff.
@@ -1755,7 +2376,7 @@ function renderGameday() {
             <div class="player-name">${escHtml(e.playerName)}</div>
             <div class="player-sub">${escHtml(e.pos)} · ${escHtml(e.nflTeam || "—")}</div>
           </td>
-          <td><span class="league-tag">${escHtml(e.leagueName)}</span><div class="player-sub">${e.platform === "espn" ? "ESPN" : "Sleeper"} · ${escHtml(e.teamLabel)}</div></td>
+          <td><span class="league-tag">${escHtml(e.leagueName)}</span><div class="player-sub">${e.platform === "espn" ? "ESPN" : e.platform === "yahoo" ? "Yahoo" : "Sleeper"} · ${escHtml(e.teamLabel)}</div></td>
           <td class="fpts-cell">${fptsFor(e)}</td>
         </tr>`).join("");
     card.innerHTML = `
@@ -1860,4 +2481,12 @@ setTimeout(() => {
   autoLoadPersistedEspnLeagues().catch((e) => {
     console.warn("[FantasyCast] ESPN auto-load skipped", e);
   });
+}, 300);
+// Yahoo manual leagues restore synchronously (localStorage only, no fetch).
+setTimeout(() => {
+  try {
+    loadYahooPersisted();
+  } catch (e) {
+    console.warn("[FantasyCast] Yahoo auto-load skipped", e);
+  }
 }, 300);

@@ -73,6 +73,46 @@
           <div id="espn-status" class="status">Enter an ESPN League ID above to load it.</div>
         </div>
         <div class="panel-group">
+          <h3>Yahoo (manual)</h3>
+          <p class="espn-hint">Private leagues welcome — no login needed. On Yahoo web, open your matchup, copy the whole page, and paste it below. GameDay only (no Lineups card). League name, week, and team names are auto-detected from a full-page paste — leave any field blank to use the detected value. Fan Pts only, no projections. Only shows when the saved week matches the current week — re-paste weekly.</p>
+          <div class="controls">
+            <label style="flex:1 1 100%">
+              Matchup paste
+              <textarea id="yahoo-paste-input" rows="5" placeholder="Paste the Yahoo matchup page here — league, week, and team names fill in below"></textarea>
+            </label>
+            <button id="yahoo-parse-btn" type="button">Parse &amp; preview</button>
+          </div>
+          <div class="controls" style="margin-top:8px">
+            <label>
+              League name
+              <input id="yahoo-league-input" type="text" placeholder="(auto from paste)" spellcheck="false" />
+            </label>
+            <label>
+              Week
+              <input id="yahoo-week-input" type="number" min="1" max="18" placeholder="auto" />
+            </label>
+            <label>
+              My side
+              <select id="yahoo-side-input">
+                <option value="left" selected>Left team is mine</option>
+                <option value="right">Right team is mine</option>
+              </select>
+            </label>
+            <label>
+              My team
+              <input id="yahoo-my-team-input" type="text" placeholder="(auto from paste)" spellcheck="false" />
+            </label>
+            <label>
+              Opponent
+              <input id="yahoo-opp-team-input" type="text" placeholder="(auto from paste)" spellcheck="false" />
+            </label>
+            <button id="yahoo-save-btn" type="button">Save Yahoo league</button>
+          </div>
+          <div id="yahoo-preview" style="margin-top:8px"></div>
+          <div id="yahoo-loaded-list" class="toggles" style="margin-top:8px"></div>
+          <div id="yahoo-status" class="status">Paste a Yahoo matchup above to add it.</div>
+        </div>
+        <div class="panel-group">
           <h3>Leagues</h3>
           <div id="visible-count" class="player-sub">No leagues loaded yet.</div>
           <div id="league-toggles" class="toggles"></div>
@@ -99,7 +139,7 @@
         <div class="gd-controls">
           <div>
             <h2 style="margin:0">GameDay</h2>
-            <p class="player-sub" style="margin:4px 0 0 0">My starters + opponent starters only (benches excluded). Shotgun / chopped / guillotine leagues show my starters with no opponent. Fantasy points are live league scoring — treated as half-PPR comparable; dynasty value shown if a league hasn't reported yet.</p>
+            <p class="player-sub" style="margin:4px 0 0 0">My starters + opponent starters only (benches excluded). Shotgun / chopped / guillotine leagues show my starters with no opponent. Fantasy points are live league scoring — treated as half-PPR comparable; dynasty value shown if a league hasn't reported yet. Manual Yahoo pastes are static snapshots (re-paste to update) and only show when their week matches the current week.</p>
           </div>
           <div class="controls">
             <button id="gameday-refresh-btn" type="button">Refresh scores</button>

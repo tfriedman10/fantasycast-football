@@ -223,6 +223,43 @@ tr.locked .game-pill { opacity: 0.75; }
 }
 .pill.platform-sleeper { background: #123a2e; border-color: #1f6b52; color: #7df0c4; font-weight: 700; }
 .pill.platform-espn { background: #3a1c22; border-color: #8a3547; color: #ff9db0; font-weight: 700; }
+.pill.platform-yahoo { background: #2c2145; border-color: #6d4fc2; color: #cdb9ff; font-weight: 700; }
+#yahoo-paste-input {
+  width: 100%;
+  min-height: 90px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+.yahoo-preview-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; table-layout: fixed; }
+.yahoo-preview-table input {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  width: 100%;
+  min-width: 0;
+}
+.yahoo-preview-scroll { overflow-x: auto; margin: 6px -4px 0; padding: 0 4px; }
+.yahoo-preview-table th.yahoo-slot, .yahoo-preview-table td.yahoo-slot { width: 56px; }
+.yahoo-preview-table th.yahoo-nflcol { width: 60px; }
+.yahoo-preview-table th.yahoo-fancol { width: 68px; }
+.yahoo-preview-table input.yahoo-nfl { text-transform: uppercase; }
+.yahoo-preview-table .player-sub { margin-top: 2px; }
+.yahoo-preview-table tr.yahoo-group td {
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
 .espn-hint { color: var(--muted); font-size: 13px; margin: 0 0 12px 0; }
 .espn-hint code { background: var(--card-2); padding: 1px 6px; border-radius: 6px; }
 #espn-section .controls { margin-bottom: 10px; }
@@ -333,7 +370,7 @@ footer a { color: var(--accent); }
 .mu-table td { vertical-align: top; }
 .mu-cell { width: 50%; }
 .mu-cell.mine { border-right: 1px solid var(--border); }
-.mu-player { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; }
+.mu-player { display: flex; flex-direction: column; gap: 1px; padding: 3px 0; }
 .mu-line1 { display: flex; align-items: baseline; gap: 8px; }
 .mu-line1 .fpts-cell { margin-left: auto; }
 .slot-inline {
@@ -347,3 +384,21 @@ footer a { color: var(--accent); }
   white-space: nowrap;
 }
 .mu-game { color: var(--muted); }
+/* ME/OPP chips only matter once the matchup columns stack on phones. */
+.mu-side-chip { display: none; }
+
+/* ---- Phone layout: matchup mode stacks, type shrinks ---- */
+@media (max-width: 640px) {
+  .mu-team-name { font-size: 14px; }
+  .mu-team-score { font-size: 19px; }
+  .mu-table thead { display: none; }
+  .mu-table, .mu-table tbody, .mu-table tr.mu-row, .mu-table td.mu-cell {
+    display: block;
+    width: 100%;
+  }
+  .mu-cell.mine { border-right: none; }
+  .mu-table tr.mu-row { border-bottom: 1px solid var(--border); }
+  .mu-side-chip { display: inline-block; }
+  .slot-inline { font-size: 10px; padding: 1px 6px; }
+  .mu-game { overflow-wrap: anywhere; }
+}
