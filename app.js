@@ -1052,12 +1052,21 @@ function parseYahooNumber(tok) {
 
 // Player block looks like "J. BurrowCin - QB" (no space before team),
 // "J. Cook IIIBuf - RB", "BroncosDen - DEF", "K. MurrayMin - QB Q".
+// Newer Yahoo web copies split it across lines instead: a name line
+// ("Patrick Mahomes" or "Patrick MahomesVideo ForecastPlayer Note") followed
+// by a team line ("KC - QB") and a game line ("Sun 1:00 pm @ Mia").
 function parseYahooPlayerBlock(line) {
   if (!line) return null;
-  const m = String(line).trim().match(/^(.+?)([A-Z][A-Za-z]{1,2})\s*-\s*(QB|RB|WR|TE|K|DEF)\b\s*(Q|PUP-R|PUP|IR|O|D|SUSP|OUT)?$/);
+  const t = String(line).trim();
+  if (!t) return null;
+  // A bare team line ("KC - QB", "LAC - RB") is NOT a fused block — the
+  // split-format resolver handles it. Without this guard "LAC - RB" parses
+  // as name "L" + team "AC".
+  if (/^[A-Za-z]{2,3}\s*-\s*(QB|RB|WR|TE|K|DEF)\b/i.test(t)) return null;
+  const m = t.match(/^(.+?)([A-Z][A-Za-z]{1,2})\s*-\s*(QB|RB|WR|TE|K|DEF)\b\s*(Q|PUP-R|PUP|IR|O|D|SUSP|OUT)?$/);
   if (!m) return null;
   const name = m[1].trim();
-  if (!name) return null;
+  if (name.length < 2) return null;
   const abbr = m[2].toUpperCase();
   const pos = m[3].toUpperCase();
   return {
@@ -1066,6 +1075,89 @@ function parseYahooPlayerBlock(line) {
     rawAbbr: abbr,
     pos,
   };
+}
+
+// Bare team line of the split format: "KC - QB", "Jax - WR", "Den - DEF".
+// Abbr case varies ("Car", "Ari", "NYG"); pos may carry a trailing status.
+function parseYahooTeamOnlyLine(line) {
+  if (!line) return null;
+  const m = String(line).trim().match(/^([A-Za-z]{2,3})\s*-\s*(QB|RB|WR|TE|K|DEF)\b\s*(Q|PUP-R|PUP|IR|O|D|SUSP|OUT)?$/i);
+  if (!m) return null;
+  const abbr = m[1].toUpperCase();
+  const pos = m[2].toUpperCase();
+  return { nfl: normTeam(abbr), rawAbbr: abbr, pos };
+}
+
+// Name line of the split format. Strips Yahoo's glued suffixes
+// ("...Video ForecastPlayer Note", "...Player Note",
+// "...No new player Notes") and a glued Q/O/D tag ("BarkleyQ...").
+// Returns the clean name, or null when the line isn't a plausible name
+// (game lines, stat lines, numbers, headers).
+function cleanYahooPlayerName(line) {
+  if (!line) return null;
+  let s = String(line).trim();
+  if (!s || s.length < 2 || s.length > 60) return null;
+  s = s.replace(/\s*(Video\s?Forecast\s?(New\s?)?Player\s?Note|Player\s?Note|No\s?new\s?player\s?Notes?)\s*$/i, "");
+  s = s.trim();
+  if (!s || s.length < 2 || s.length > 60) return null;
+  // Glued injury tag: "Saquon BarkleyQ" -> "Saquon Barkley".
+  const glued = s.match(/^(.+[a-z])([QOD])$/);
+  if (glued && /\s/.test(glued[1])) s = glued[1].trim();
+  // Spaced injury tag: "Name Q" -> "Name".
+  s = s.replace(/\s+(Q|O|D|OUT|IR|SUSP|PUP-R|PUP)\s*$/i, "").trim();
+  if (!s || s.length < 2) return null;
+  if (/[0-9@#%|:©]/.test(s)) return null;
+  if (/\b(Yds|TD|Int|Sack|PA|Final|vs\.?|Proj|Fan Pts|Orig Proj|Stats|Player|Total|Note|Hide|Compare Managers)\b/i.test(s)) return null;
+  if (/^(vs\.?|total|stats|player|proj|fan pts|pos|hide|note)$/i.test(s)) return null;
+  if (!/^[A-Za-z][A-Za-z.'\- ]*$/.test(s)) return null;
+  if (isYahooSlotToken(s)) return null;
+  if (parseYahooTeamOnlyLine(s)) return null;
+  return s;
+}
+
+// Name for a split-format team line: the nearest plausible name line just
+// above it (covers the duplicated "Name" / "NameVideo..." pair).
+function findYahooNameBefore(lines, teamIdx) {
+  for (let j = teamIdx - 1; j >= 0 && teamIdx - j <= 4; j--) {
+    if (isYahooSlotToken(lines[j])) break;
+    const nm = cleanYahooPlayerName(lines[j]);
+    if (nm) return nm;
+  }
+  return null;
+}
+
+// Nearest player block to a slot line: fused single-line blocks first, then
+// split team-line + name-line pairs. dir < 0 scans left (before slot),
+// dir > 0 scans right (after slot).
+function findYahooPlayer(lines, slotIdx, dir) {
+  const step = dir < 0 ? -1 : 1;
+  for (let k = slotIdx + step; dir < 0 ? (k >= 0 && slotIdx - k <= 10) : (k < lines.length && k - slotIdx <= 10); k += step) {
+    if (isYahooSlotToken(lines[k])) break;
+    const fused = parseYahooPlayerBlock(lines[k]);
+    if (fused) return fused;
+    const teamOnly = parseYahooTeamOnlyLine(lines[k]);
+    if (teamOnly) {
+      const nm = findYahooNameBefore(lines, k);
+      if (nm) {
+        return {
+          playerName: teamOnly.pos === "DEF" ? `${teamOnly.rawAbbr} Defense` : nm,
+          nfl: teamOnly.nfl,
+          rawAbbr: teamOnly.rawAbbr,
+          pos: teamOnly.pos,
+        };
+      }
+      // Defense is identifiable from the team line alone.
+      if (teamOnly.pos === "DEF") {
+        return {
+          playerName: `${teamOnly.rawAbbr} Defense`,
+          nfl: teamOnly.nfl,
+          rawAbbr: teamOnly.rawAbbr,
+          pos: teamOnly.pos,
+        };
+      }
+    }
+  }
+  return null;
 }
 
 function normYahooSlot(t) {
@@ -1118,18 +1210,8 @@ function parseYahooMatchupPaste(text) {
       if (isYahooSlotToken(lines[k])) break;
       if (isNumTok(lines[k])) rightNums.push(lines[k]);
     }
-    let leftPlayer = null;
-    for (let k = i - 1; k >= 0 && i - k <= 8; k--) {
-      if (isYahooSlotToken(lines[k])) break;
-      const p = parseYahooPlayerBlock(lines[k]);
-      if (p) { leftPlayer = p; break; }
-    }
-    let rightPlayer = null;
-    for (let k = i + 1; k < lines.length && k - i <= 8; k++) {
-      if (isYahooSlotToken(lines[k])) break;
-      const p = parseYahooPlayerBlock(lines[k]);
-      if (p) { rightPlayer = p; break; }
-    }
+    const leftPlayer = findYahooPlayer(lines, i, -1);
+    const rightPlayer = findYahooPlayer(lines, i, 1);
     if (!starter) continue; // BN/IR bench rows: not used by GameDay
     if (!leftPlayer && !rightPlayer) {
       warnings.push(`A "${slot}" row had no parseable players and was skipped.`);
@@ -1184,15 +1266,23 @@ function parseYahooMatchupMeta(text) {
     .map((s) => s.trim())
     .filter((s) => s !== "");
   // Only the pre-table header carries our matchup's names; the page footer
-  // repeats other matchups, so stop at the first table header row.
+  // repeats other matchups, so stop at the first table header row. Newer
+  // Yahoo copies split the header across lines ("Stats" / "Player" / ...).
   let end = head.findIndex((s) => /^stats\s+player/i.test(s));
+  if (end === -1) {
+    end = head.findIndex((s, idx) =>
+      /^stats$/i.test(s) && head.slice(idx, idx + 4).some((x) => /^player$/i.test(x))
+    );
+  }
   if (end === -1) end = head.length;
   const region = head.slice(0, end);
-  for (const s of region) {
+  for (const s of head) {
     const lm = s.match(/^(.*?)\s*\(ID#\s*\d+\)\s*$/);
     if (lm && lm[1].trim()) { out.leagueName = lm[1].trim(); break; }
   }
-  for (const s of region) {
+  // Week may live in the header ("Week 1: Sep 9 - Sep 14") or only in the
+  // footer note ("Note: Week 3 stats may change..."), so scan whole paste.
+  for (const s of head) {
     const wm = s.match(/\bWeek\s+(\d{1,2})\b/);
     if (wm) {
       const w = parseInt(wm[1], 10);
@@ -1200,13 +1290,14 @@ function parseYahooMatchupMeta(text) {
       break;
     }
   }
-  const isRecord = (s) => /^\d+\s*-\s*\d+\s*-\s*\d+$/.test(s);
+  // Records may carry a rank suffix: "1-1-0 | 9th".
+  const isRecord = (s) => /^\d+\s*-\s*\d+\s*-\s*\d+(\s*\|\s*.*)?$/.test(s);
   const isNameLike = (s) =>
     s.length >= 1 && s.length <= 60 &&
     !/^vs\.?$/i.test(s) && !/^total$/i.test(s) &&
     !/orig proj|proj pts|players remaining|underdog|favorite|matchups/i.test(s) &&
     !/^-?\d+\.\d{1,2}$/.test(s) && !/^[-—–]$/.test(s) &&
-    !isYahooSlotToken(s) && !parseYahooPlayerBlock(s);
+    !isYahooSlotToken(s) && !parseYahooPlayerBlock(s) && !parseYahooTeamOnlyLine(s);
   const teams = [];
   for (let i = 0; i < region.length; i++) {
     if (!isRecord(region[i]) || i < 2) continue;
