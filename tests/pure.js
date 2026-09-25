@@ -218,6 +218,142 @@ check("parseYahooPlayerBlock: fused name+team, DEF, junk", () => {
   delete sandbox.__yp1; delete sandbox.__yp2; delete sandbox.__yp3; delete sandbox.__yp4;
 });
 
+check("parseYahooPlayerBlock rejects bare team lines (split format)", () => {
+  sandbox.__tb1 = "KC - QB";
+  sandbox.__tb2 = "LAC - RB";
+  sandbox.__tb3 = "NYG - TE";
+  assert.strictEqual(vm.runInContext(`parseYahooPlayerBlock(__tb1)`, sandbox), null);
+  assert.strictEqual(vm.runInContext(`parseYahooPlayerBlock(__tb2)`, sandbox), null);
+  assert.strictEqual(vm.runInContext(`parseYahooPlayerBlock(__tb3)`, sandbox), null);
+  delete sandbox.__tb1; delete sandbox.__tb2; delete sandbox.__tb3;
+});
+
+check("parseYahooTeamOnlyLine + cleanYahooPlayerName split-format helpers", () => {
+  sandbox.__st1 = "Jax - WR";
+  sandbox.__st2 = "Den - DEF";
+  sandbox.__st3 = "J. BurrowCin - QB";
+  assert.deepStrictEqual(appJson(`parseYahooTeamOnlyLine(__st1)`),
+    { nfl: "JAX", rawAbbr: "JAX", pos: "WR" });
+  assert.deepStrictEqual(appJson(`parseYahooTeamOnlyLine(__st2)`),
+    { nfl: "DEN", rawAbbr: "DEN", pos: "DEF" });
+  assert.strictEqual(vm.runInContext(`parseYahooTeamOnlyLine(__st3)`, sandbox), null);
+  sandbox.__sn1 = "Saquon BarkleyQVideo ForecastNew Player Note";
+  sandbox.__sn2 = "Patrick MahomesVideo ForecastPlayer Note";
+  sandbox.__sn3 = "Luther Burden IIIVideo ForecastPlayer Note";
+  sandbox.__sn4 = "Sun 1:00 pm @ Mia";
+  sandbox.__sn5 = "BroncosNo new player Notes";
+  assert.strictEqual(app(`cleanYahooPlayerName(__sn1)`), "Saquon Barkley");
+  assert.strictEqual(app(`cleanYahooPlayerName(__sn2)`), "Patrick Mahomes");
+  assert.strictEqual(app(`cleanYahooPlayerName(__sn3)`), "Luther Burden III");
+  assert.strictEqual(vm.runInContext(`cleanYahooPlayerName(__sn4)`, sandbox), null);
+  assert.strictEqual(app(`cleanYahooPlayerName(__sn5)`), "Broncos");
+  delete sandbox.__st1; delete sandbox.__st2; delete sandbox.__st3;
+  delete sandbox.__sn1; delete sandbox.__sn2; delete sandbox.__sn3;
+  delete sandbox.__sn4; delete sandbox.__sn5;
+});
+
+check("parseYahooMatchupPaste: split name/team-line format, 10+10, no warnings", () => {
+  sandbox.__ys = [
+    "Tyler's Tip-Top Team",
+    "Tyler",
+    "1-1-0 | 9th",
+    "0.00",
+    "vs",
+    "0.00",
+    "115.81",
+    "Orig Proj",
+    "108.88",
+    "Jen's Pleasant Team",
+    "Jen",
+    "1-1-0 | 5th",
+    "Stats",
+    "Player",
+    "Proj",
+    "Fan Pts",
+    "Pos",
+    "Fan Pts",
+    "Proj",
+    "Player",
+    "Stats",
+    "Patrick Mahomes",
+    "Patrick MahomesVideo ForecastPlayer Note",
+    "KC - QB",
+    "Sun 1:00 pm @ Mia",
+    "20.32",
+    "–",
+    "QB",
+    "–",
+    "15.73",
+    "Bryce Young",
+    "Bryce YoungVideo ForecastPlayer Note",
+    "Car - QB",
+    "Sun 1:00 pm @ Cle",
+    "Saquon Barkley",
+    "Saquon BarkleyQVideo ForecastNew Player Note",
+    "Phi - RB",
+    "Mon 8:15 pm @ Chi",
+    "13.68",
+    "–",
+    "RB",
+    "–",
+    "17.87",
+    "Bijan Robinson",
+    "Bijan RobinsonVideo ForecastPlayer Note",
+    "Atl - RB",
+    "Thu 8:15 pm @ GB",
+    "Courtland Sutton",
+    "Courtland SuttonVideo ForecastPlayer Note",
+    "Den - WR",
+    "Sun 8:20 pm vs LAR",
+    "8.75",
+    "–",
+    "W/R/T",
+    "–",
+    "8.31",
+    "Devaughn Vele",
+    "Devaughn VeleVideo ForecastPlayer Note",
+    "NO - WR",
+    "Sun 4:25 pm vs LV",
+    "Jake Bates",
+    "Jake BatesPlayer Note",
+    "Det - K",
+    "Sun 1:00 pm vs NYJ",
+    "8.64",
+    "–",
+    "K",
+    "–",
+    "8.37",
+    "Brandon Aubrey",
+    "Brandon AubreyPlayer Note",
+    "Dal - K",
+    "Sun 4:25 pm vs Bal",
+    "Broncos",
+    "BroncosNo new player Notes",
+    "Den - DEF",
+    "Sun 8:20 pm vs LAR",
+    "5.36",
+    "–",
+    "DEF",
+    "–",
+    "5.76",
+    "Rams",
+    "RamsNo new player Notes",
+    "LAR - DEF",
+    "Sun 8:20 pm @ Den",
+  ].join("\n");
+  const res = appJson(`parseYahooMatchupPaste(__ys)`);
+  assert.strictEqual(res.left.length, 5, `left was ${JSON.stringify(res.left)}`);
+  assert.strictEqual(res.right.length, 5, `right was ${JSON.stringify(res.right)}`);
+  assert.deepStrictEqual(res.warnings, []);
+  assert.deepStrictEqual(res.left[0], { slot: "QB", playerName: "Patrick Mahomes", pos: "QB", nflTeam: "KC", fantasyPts: null });
+  assert.deepStrictEqual(res.right[0], { slot: "QB", playerName: "Bryce Young", pos: "QB", nflTeam: "CAR", fantasyPts: null });
+  assert.deepStrictEqual(res.left[1], { slot: "RB", playerName: "Saquon Barkley", pos: "RB", nflTeam: "PHI", fantasyPts: null });
+  assert.deepStrictEqual(res.left[3], { slot: "K", playerName: "Jake Bates", pos: "K", nflTeam: "DET", fantasyPts: null });
+  assert.deepStrictEqual(res.left[4], { slot: "DEF", playerName: "DEN Defense", pos: "DEF", nflTeam: "DEN", fantasyPts: null });
+  assert.deepStrictEqual(res.right[4], { slot: "DEF", playerName: "LAR Defense", pos: "DEF", nflTeam: "LAR", fantasyPts: null });
+  delete sandbox.__ys;
+});
+
 check("parseYahooMatchupPaste: mirrored cols, dash nulls, DEF, BN skip", () => {
   sandbox.__yp = [
     "Tyler's Tip-Top Team",
@@ -354,6 +490,41 @@ check("parseYahooMatchupMeta: table-only paste yields nulls", () => {
     leagueName: null, leftTeam: null, rightTeam: null, week: null,
   });
   delete sandbox.__ym2;
+});
+
+check("parseYahooMatchupMeta: rank-suffixed records, split header, footer week note", () => {
+  sandbox.__ym3 = [
+    "Tyler's Tip-Top Team",
+    "Tyler",
+    "1-1-0 | 9th",
+    "0.00",
+    "vs",
+    "0.00",
+    "115.81",
+    "Orig Proj",
+    "108.88",
+    "Jen's Pleasant Team",
+    "Jen",
+    "1-1-0 | 5th",
+    "Stats",
+    "Player",
+    "Proj",
+    "Fan Pts",
+    "Pos",
+    "Patrick Mahomes",
+    "KC - QB",
+    "20.32",
+    "QB",
+    "15.73",
+    "Note: Week 3 stats may change if stat corrections are applied by Thursday, Oct 1.",
+  ].join("\n");
+  assert.deepStrictEqual(appJson(`parseYahooMatchupMeta(__ym3)`), {
+    leagueName: null,
+    leftTeam: "Tyler's Tip-Top Team",
+    rightTeam: "Jen's Pleasant Team",
+    week: 3,
+  });
+  delete sandbox.__ym3;
 });
 
 check("fmtMinsSuffix: silent on finals/byes, shown otherwise", () => {
